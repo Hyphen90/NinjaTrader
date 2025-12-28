@@ -40,6 +40,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private HashSet<double> tradedHighs = new HashSet<double>();
 		private HashSet<double> tradedLows = new HashSet<double>();
 
+		// Reversal distance tracking variables
+		private double zoneHighExtremum = 0;
+		private double zoneLowExtremum = 0;
+		private bool inZoneForHigh = false;
+		private bool inZoneForLow = false;
+
 		// ATM Strategy variables
 		private string atmStrategyId = string.Empty;
 		private string orderId = string.Empty;
@@ -72,6 +78,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				ZoneAbovePoints = 2.0;
 				ZoneBelowPoints = 2.0;
 
+				// Reversal distance parameter (0 = OnBarClose mode, >0 = tick-based reversal mode)
+				ReversalDistancePoints = 0.0;
+
 				// Risk management in points
 				StopLossPoints = 10.0;
 				ProfitTargetPoints = 15.0;
@@ -88,6 +97,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (State == State.DataLoaded)
 			{
+				// Set Calculate mode based on ReversalDistancePoints
+				if (ReversalDistancePoints > 0)
+					Calculate = Calculate.OnEachTick;
+				else
+					Calculate = Calculate.OnBarClose;
+
 				// Create ZigZag indicator with points deviation
 				zigZag = ZigZag(DeviationType.Points, DeviationValue, UseHighLow);
 				AddChartIndicator(zigZag);
@@ -126,6 +141,42 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Invalidate zones that have been passed through without reversal
 			InvalidateZones();
 
+			// For OnBarClose mode, check for orders at bar close
+			if (ReversalDistancePoints == 0)
+			{
+				CheckForOrders();
+			}
+			else
+			{
+				// For tick-based mode, reset zone tracking at new bar
+				ResetZoneTracking();
+			}
+		}
+
+		protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
+		{
+			if (ReversalDistancePoints == 0 || CurrentBar < BarsRequiredToTrade)
+				return;
+
+			// Only process last price updates
+			if (marketDataUpdate.MarketDataType != MarketDataType.Last)
+				return;
+
+			// Time filter check
+			DateTime currentTime = Time[0];
+			if (currentTime.TimeOfDay < TradingStartTime || currentTime.TimeOfDay > TradingEndTime)
+				return;
+
+			// Only trade if flat
+			if (Position.MarketPosition != MarketPosition.Flat)
+				return;
+
+			// Check for reversal distance orders
+			CheckForReversalDistanceOrders(marketDataUpdate.Price);
+		}
+
+		private void CheckForOrders()
+		{
 			// Time filter check
 			DateTime currentTime = Time[0];
 			if (currentTime.TimeOfDay < TradingStartTime || currentTime.TimeOfDay > TradingEndTime)
@@ -144,6 +195,115 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Handle ATM strategy if configured and running live
 			if (!string.IsNullOrEmpty(AtmTemplateName) && State != State.Historical)
 				HandleAtmStrategy();
+		}
+
+		private void CheckForReversalDistanceOrders(double currentPrice)
+		{
+			// Check ALL ZigZag highs for potential short entries
+			foreach (ZigZagLevel high in zigZagHighs.ToList())
+			{
+				if (tradedHighs.Contains(high.Price))
+					continue;
+
+				// Check if current price is within the proximity zone
+				double zoneTop = high.Price + ZoneAbovePoints;
+				double zoneBottom = high.Price - ZoneBelowPoints;
+
+				if (currentPrice >= zoneBottom && currentPrice <= zoneTop)
+				{
+					// Enter zone - start tracking extremum
+					if (!inZoneForHigh)
+					{
+						inZoneForHigh = true;
+						zoneHighExtremum = currentPrice;
+						Print(string.Format("Tick: Entered HIGH zone at {0} (ZigZag: {1}), starting extremum tracking at {2}",
+							currentPrice, high.Price, zoneHighExtremum));
+					}
+					else
+					{
+						// Update extremum if price is higher
+						if (currentPrice > zoneHighExtremum)
+						{
+							zoneHighExtremum = currentPrice;
+						}
+						// Check for reversal: price drops by ReversalDistancePoints from extremum
+						else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
+						{
+							Print(string.Format("Tick: SHORT Reversal detected! ZigZag HIGH: {0}, Extremum: {1}, Current: {2}, Drop: {3} >= {4}",
+								high.Price, zoneHighExtremum, currentPrice, zoneHighExtremum - currentPrice, ReversalDistancePoints));
+
+							PlaceShortOrder(high.Price);
+							tradedHighs.Add(high.Price);
+							ResetZoneTracking();
+							break; // Only one order at a time
+						}
+					}
+				}
+				else if (inZoneForHigh)
+				{
+					// Left zone - reset tracking
+					Print(string.Format("Tick: Left HIGH zone (price: {0}, zone: [{1}-{2}])", currentPrice, zoneBottom, zoneTop));
+					inZoneForHigh = false;
+					zoneHighExtremum = 0;
+				}
+			}
+
+			// Check ALL ZigZag lows for potential long entries
+			foreach (ZigZagLevel low in zigZagLows.ToList())
+			{
+				if (tradedLows.Contains(low.Price))
+					continue;
+
+				// Check if current price is within the proximity zone
+				double zoneTop = low.Price + ZoneBelowPoints;
+				double zoneBottom = low.Price - ZoneAbovePoints;
+
+				if (currentPrice >= zoneBottom && currentPrice <= zoneTop)
+				{
+					// Enter zone - start tracking extremum
+					if (!inZoneForLow)
+					{
+						inZoneForLow = true;
+						zoneLowExtremum = currentPrice;
+						Print(string.Format("Tick: Entered LOW zone at {0} (ZigZag: {1}), starting extremum tracking at {2}",
+							currentPrice, low.Price, zoneLowExtremum));
+					}
+					else
+					{
+						// Update extremum if price is lower
+						if (currentPrice < zoneLowExtremum)
+						{
+							zoneLowExtremum = currentPrice;
+						}
+						// Check for reversal: price rises by ReversalDistancePoints from extremum
+						else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
+						{
+							Print(string.Format("Tick: LONG Reversal detected! ZigZag LOW: {0}, Extremum: {1}, Current: {2}, Rise: {3} >= {4}",
+								low.Price, zoneLowExtremum, currentPrice, currentPrice - zoneLowExtremum, ReversalDistancePoints));
+
+							PlaceLongOrder(low.Price);
+							tradedLows.Add(low.Price);
+							ResetZoneTracking();
+							break; // Only one order at a time
+						}
+					}
+				}
+				else if (inZoneForLow)
+				{
+					// Left zone - reset tracking
+					Print(string.Format("Tick: Left LOW zone (price: {0}, zone: [{1}-{2}])", currentPrice, zoneBottom, zoneTop));
+					inZoneForLow = false;
+					zoneLowExtremum = 0;
+				}
+			}
+		}
+
+		private void ResetZoneTracking()
+		{
+			inZoneForHigh = false;
+			inZoneForLow = false;
+			zoneHighExtremum = 0;
+			zoneLowExtremum = 0;
 		}
 
 		private void CheckZigZagHighs()
@@ -378,8 +538,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "TradingEndTime", Order = 8, GroupName = "Time Filter")]
 		public TimeSpan TradingEndTime { get; set; }
 
+		[Range(0, double.MaxValue), NinjaScriptProperty]
+		[Display(Name = "ReversalDistancePoints", Order = 9, GroupName = "Reversal Mode")]
+		public double ReversalDistancePoints { get; set; }
+
 		[NinjaScriptProperty]
-		[Display(Name = "AtmTemplateName", Order = 9, GroupName = "ATM Strategy")]
+		[Display(Name = "AtmTemplateName", Order = 10, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
 
 		#endregion
