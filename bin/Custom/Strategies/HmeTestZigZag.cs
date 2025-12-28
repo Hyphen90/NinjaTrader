@@ -55,6 +55,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			public double Price { get; set; }
 			public int DetectedBar { get; set; }
+			public int ActivationBar { get; set; }  // Bar when zone becomes active
+			public bool HasLeftZone { get; set; }    // True if price has left zone at least once
 		}
 
 		protected override void OnStateChange()
@@ -121,9 +123,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				zigZagHighs.Add(new ZigZagLevel
 				{
 					Price = currentZigZagHigh,
-					DetectedBar = CurrentBar
+					DetectedBar = CurrentBar,
+					ActivationBar = CurrentBar + 1,  // Zone becomes active in next bar
+					HasLeftZone = false
 				});
-				Print(string.Format("Bar {0}: New ZigZag HIGH detected at {1}", CurrentBar, currentZigZagHigh));
+				Print(string.Format("Bar {0}: New ZigZag HIGH detected at {1} (activation bar: {2})", CurrentBar, currentZigZagHigh, CurrentBar + 1));
 			}
 
 			// Detect new ZigZag lows and add to list
@@ -133,9 +137,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				zigZagLows.Add(new ZigZagLevel
 				{
 					Price = currentZigZagLow,
-					DetectedBar = CurrentBar
+					DetectedBar = CurrentBar,
+					ActivationBar = CurrentBar + 1,  // Zone becomes active in next bar
+					HasLeftZone = false
 				});
-				Print(string.Format("Bar {0}: New ZigZag LOW detected at {1}", CurrentBar, currentZigZagLow));
+				Print(string.Format("Bar {0}: New ZigZag LOW detected at {1} (activation bar: {2})", CurrentBar, currentZigZagLow, CurrentBar + 1));
 			}
 
 			// Invalidate zones that have been passed through without reversal
@@ -314,6 +320,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (tradedHighs.Contains(high.Price))
 					continue;
 
+				// Zone must be active and price must have left zone at least once
+				if (CurrentBar < high.ActivationBar || !high.HasLeftZone)
+					continue;
+
 				// Check if current bar's high is within the proximity zone
 				double zoneTop = high.Price + ZoneAbovePoints;
 				double zoneBottom = high.Price - ZoneBelowPoints;
@@ -340,6 +350,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			foreach (ZigZagLevel low in zigZagLows.ToList())
 			{
 				if (tradedLows.Contains(low.Price))
+					continue;
+
+				// Zone must be active and price must have left zone at least once
+				if (CurrentBar < low.ActivationBar || !low.HasLeftZone)
 					continue;
 
 				// Check if current bar's low is within the proximity zone
@@ -434,48 +448,73 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private void InvalidateZones()
 		{
-			// Remove ZigZag highs that have been passed through without reversal
-			zigZagHighs.RemoveAll(high =>
+			// Process ZigZag highs
+			foreach (ZigZagLevel high in zigZagHighs.ToList())
 			{
 				if (tradedHighs.Contains(high.Price))
-					return false; // Already traded, keep in list
+					continue; // Already traded, skip
+
+				// Zone not yet active
+				if (CurrentBar < high.ActivationBar)
+					continue;
 
 				// Calculate zone boundaries
 				double zoneTop = high.Price + ZoneAbovePoints;
 				double zoneBottom = high.Price - ZoneBelowPoints;
+
+				// Check if price is currently in zone
+				bool isInZone = High[0] >= zoneBottom && High[0] <= zoneTop;
+
+				// Set HasLeftZone flag if price has left zone at least once
+				if (!isInZone && !high.HasLeftZone)
+				{
+					high.HasLeftZone = true;
+					Print(string.Format("Bar {0}: ZigZag HIGH at {1} - price left zone (High: {2}, zone: [{3}-{4}])",
+						CurrentBar, high.Price, High[0], zoneBottom, zoneTop));
+				}
 
 				// Invalidate if price has moved above the zone (passed through without reversal)
 				if (High[0] > zoneTop)
 				{
 					Print(string.Format("Bar {0}: ZigZag HIGH zone at {1} invalidated (price {2} > zone top {3})",
 						CurrentBar, high.Price, High[0], zoneTop));
-					return true; // Remove from list
+					zigZagHighs.Remove(high);
 				}
+			}
 
-				return false; // Keep in list
-			});
-
-			// Remove ZigZag lows that have been passed through without reversal
-			zigZagLows.RemoveAll(low =>
+			// Process ZigZag lows
+			foreach (ZigZagLevel low in zigZagLows.ToList())
 			{
 				if (tradedLows.Contains(low.Price))
-					return false; // Already traded, keep in list
+					continue; // Already traded, skip
+
+				// Zone not yet active
+				if (CurrentBar < low.ActivationBar)
+					continue;
 
 				// Calculate zone boundaries
-				// ZoneAbovePoints: below the low (further down), ZoneBelowPoints: above the low (where price comes from)
 				double zoneTop = low.Price + ZoneBelowPoints;
 				double zoneBottom = low.Price - ZoneAbovePoints;
+
+				// Check if price is currently in zone
+				bool isInZone = Low[0] >= zoneBottom && Low[0] <= zoneTop;
+
+				// Set HasLeftZone flag if price has left zone at least once
+				if (!isInZone && !low.HasLeftZone)
+				{
+					low.HasLeftZone = true;
+					Print(string.Format("Bar {0}: ZigZag LOW at {1} - price left zone (Low: {2}, zone: [{3}-{4}])",
+						CurrentBar, low.Price, Low[0], zoneBottom, zoneTop));
+				}
 
 				// Invalidate if price has moved below the zone (passed through without reversal)
 				if (Low[0] < zoneBottom)
 				{
 					Print(string.Format("Bar {0}: ZigZag LOW zone at {1} invalidated (price {2} < zone bottom {3})",
 						CurrentBar, low.Price, Low[0], zoneBottom));
-					return true; // Remove from list
+					zigZagLows.Remove(low);
 				}
-
-				return false; // Keep in list
-			});
+			}
 		}
 
 		private void HandleAtmStrategy()
