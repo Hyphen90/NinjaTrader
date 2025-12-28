@@ -1,0 +1,54 @@
+# NinjaTrader System Files
+*.db
+*.log
+*.tmp
+*.bak
+*.old
+
+# NinjaTrader Cache and Temp Files
+**/Cache/
+**/Temp/
+**/Logs/
+
+# NinjaTrader User Data (optional - uncomment if you want to exclude)
+/*
+UserData/
+*/
+
+# NinjaTrader System Files
+*.db
+*.log
+*.tmp
+*.bak
+*.old
+
+# NinjaTrader Cache and Temp Files
+**/Cache/
+**/Temp/
+**/Logs/
+
+# NinjaTrader User Data (optional - uncomment if you want to exclude)
+/*
+UserData/
+*/
+
+# Windows System Files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE Files
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build Outputs
+**/obj/
+*.user
+*.suo
+*.cache
+
+# Personal Files
+*.private
+*password*
