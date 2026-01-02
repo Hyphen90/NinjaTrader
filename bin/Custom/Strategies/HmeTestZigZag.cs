@@ -30,7 +30,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public class HmeTestZigZag : Strategy
 	{
-		private ZigZag zigZag;
+		// Custom ZigZag implementation (no repainting!)
+		private enum TrendDirection { Up, Down, Unknown }
+		private TrendDirection currentTrend = TrendDirection.Unknown;
+		private double currentExtremum = 0;
+		private int extremumBar = -1;
 
 		// Track all ZigZag highs and lows
 		private List<ZigZagLevel> zigZagHighs = new List<ZigZagLevel>();
@@ -57,6 +61,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public int DetectedBar { get; set; }
 			public int ActivationBar { get; set; }  // Bar when zone becomes active
 			public bool HasLeftZone { get; set; }    // True if price has left zone at least once
+			public int LeftZoneBar { get; set; }     // Bar when HasLeftZone was set (prevents immediate invalidation)
+			public bool IsLineActive { get; set; }    // True if support/resistance line is still active
+			public int LineStartBar { get; set; }     // Bar where the line was first drawn
+			public int LineEndBar { get; set; }       // Bar where the line was broken (or CurrentBar if active)
 		}
 
 		protected override void OnStateChange()
@@ -94,20 +102,45 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// ATM Strategy (leave empty for standard mode)
 				AtmTemplateName = string.Empty;
 
+				// Add strategy-owned plots for ZigZag visualization (works in Strategy Analyzer)
+				AddPlot(Brushes.Red, "ZigZagHighs");
+				AddPlot(Brushes.Blue, "ZigZagLows");
+
 				// This strategy has been designed to take advantage of performance gains in Strategy Analyzer optimizations
-				IsInstantiatedOnEachOptimizationIteration = true;
+				IsInstantiatedOnEachOptimizationIteration = false;
 			}
 			else if (State == State.DataLoaded)
 			{
-				// Set Calculate mode based on ReversalDistancePoints
-				if (ReversalDistancePoints > 0)
-					Calculate = Calculate.OnEachTick;
-				else
-					Calculate = Calculate.OnBarClose;
+				// Reset variables for new run
+				zigZagHighs.Clear();
+				zigZagLows.Clear();
+				tradedHighs.Clear();
+				tradedLows.Clear();
+				currentTrend = TrendDirection.Unknown;
+				currentExtremum = 0;
+				extremumBar = -1;
+				zoneHighExtremum = 0;
+				zoneLowExtremum = 0;
+				inZoneForHigh = false;
+				inZoneForLow = false;
+				atmStrategyId = string.Empty;
+				orderId = string.Empty;
+				isAtmStrategyCreated = false;
 
-				// Create ZigZag indicator with points deviation
-				zigZag = ZigZag(DeviationType.Points, DeviationValue, UseHighLow);
-				AddChartIndicator(zigZag);
+				// Always use OnBarClose for performance with Range Bars
+				Calculate = Calculate.OnBarClose;
+
+				// Add original ZigZag indicator for visual comparison (NOT used in trading logic!)
+				ZigZag displayZigZag = ZigZag(DeviationType.Points, DeviationValue, UseHighLow);
+				AddChartIndicator(displayZigZag);
+
+				// Print strategy parameters at start
+				Print($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1} RevDist={ReversalDistancePoints:F1}");
+			}
+			else if (State == State.Terminated)
+			{
+				// Clean termination - no custom statistics needed
+				// NinjaTrader will handle all trade metrics automatically
 			}
 		}
 
@@ -116,48 +149,115 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (CurrentBar < BarsRequiredToTrade)
 				return;
 
-			// Detect new ZigZag highs and add to list
-			double currentZigZagHigh = zigZag.ZigZagHigh[0];
-			if (currentZigZagHigh != 0.0 && !zigZagHighs.Any(z => Math.Abs(z.Price - currentZigZagHigh) < 0.01))
+			// Custom ZigZag implementation (no repainting!)
+			// NOTE: NO TIME FILTER HERE - Lines should be drawn 24/7 regardless of trading hours
+
+			// Initialize trend on first bars
+			if (currentTrend == TrendDirection.Unknown && CurrentBar >= 2)
 			{
-				zigZagHighs.Add(new ZigZagLevel
+				// Determine initial trend based on first few bars
+				if (Close[0] > Open[0])
+					currentTrend = TrendDirection.Up;
+				else
+					currentTrend = TrendDirection.Down;
+
+				currentExtremum = (currentTrend == TrendDirection.Up) ? Low[0] : High[0];
+				extremumBar = CurrentBar;
+				Print($"[TREND INIT {currentTrend} B{CurrentBar} Extremum{currentExtremum:F2}]");
+			}
+
+			// Track trend and detect ZigZag points
+			if (currentTrend != TrendDirection.Unknown)
+			{
+				if (currentTrend == TrendDirection.Up)
 				{
-					Price = currentZigZagHigh,
-					DetectedBar = CurrentBar,
-					ActivationBar = CurrentBar + 1,  // Zone becomes active in next bar
-					HasLeftZone = false
-				});
-				Print(string.Format("Bar {0}: New ZigZag HIGH detected at {1} (activation bar: {2})", CurrentBar, currentZigZagHigh, CurrentBar + 1));
-			}
+					// Looking for higher highs
+					if (High[0] > currentExtremum)
+					{
+						currentExtremum = High[0];
+						extremumBar = CurrentBar;
+					}
+					// Check if price dropped enough to confirm the high
+					else if (currentExtremum - Low[0] >= DeviationValue)
+					{
+						// High confirmed! Add to ZigZag highs
+						zigZagHighs.Add(new ZigZagLevel
+						{
+							Price = currentExtremum,
+							DetectedBar = extremumBar,
+							ActivationBar = CurrentBar + 1,
+							HasLeftZone = false,
+							LeftZoneBar = -1,
+							IsLineActive = true,
+							LineStartBar = CurrentBar,
+							LineEndBar = CurrentBar + 100
+						});
 
-			// Detect new ZigZag lows and add to list
-			double currentZigZagLow = zigZag.ZigZagLow[0];
-			if (currentZigZagLow != 0.0 && !zigZagLows.Any(z => Math.Abs(z.Price - currentZigZagLow) < 0.01))
-			{
-				zigZagLows.Add(new ZigZagLevel
+						// Draw support line from peak to current bar
+						int barsAgo = CurrentBar - extremumBar;
+						Draw.Line(this, $"SupportLine_{extremumBar}", barsAgo, currentExtremum, 0, currentExtremum, Brushes.Green);
+						Print($"[HIGH CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
+
+						// Switch to downtrend
+						currentTrend = TrendDirection.Down;
+						currentExtremum = Low[0];
+						extremumBar = CurrentBar;
+					}
+				}
+				else // TrendDirection.Down
 				{
-					Price = currentZigZagLow,
-					DetectedBar = CurrentBar,
-					ActivationBar = CurrentBar + 1,  // Zone becomes active in next bar
-					HasLeftZone = false
-				});
-				Print(string.Format("Bar {0}: New ZigZag LOW detected at {1} (activation bar: {2})", CurrentBar, currentZigZagLow, CurrentBar + 1));
+					// Looking for lower lows
+					if (Low[0] < currentExtremum)
+					{
+						currentExtremum = Low[0];
+						extremumBar = CurrentBar;
+					}
+					// Check if price rose enough to confirm the low
+					else if (High[0] - currentExtremum >= DeviationValue)
+					{
+						// Low confirmed! Add to ZigZag lows
+						zigZagLows.Add(new ZigZagLevel
+						{
+							Price = currentExtremum,
+							DetectedBar = extremumBar,
+							ActivationBar = CurrentBar + 1,
+							HasLeftZone = false,
+							LeftZoneBar = -1,
+							IsLineActive = true,
+							LineStartBar = CurrentBar,
+							LineEndBar = CurrentBar + 100
+						});
+
+						// Draw resistance line from peak to current bar
+						int barsAgo = CurrentBar - extremumBar;
+						Draw.Line(this, $"ResistanceLine_{extremumBar}", barsAgo, currentExtremum, 0, currentExtremum, Brushes.Red);
+						Print($"[LOW CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
+
+						// Switch to uptrend
+						currentTrend = TrendDirection.Up;
+						currentExtremum = High[0];
+						extremumBar = CurrentBar;
+					}
+				}
 			}
 
-			// Invalidate zones that have been passed through without reversal
-			InvalidateZones();
+			// Check for orders at bar close BEFORE invalidating zones
+			// Works for both OnBarClose mode (ReversalDistancePoints = 0) and bar-based distance mode (ReversalDistancePoints > 0)
+			CheckForOrders();
 
-			// For OnBarClose mode, check for orders at bar close
-			if (ReversalDistancePoints == 0)
+			// For tick-based mode, reset zone tracking at new bar
+			if (ReversalDistancePoints > 0)
 			{
-				CheckForOrders();
-			}
-			else
-			{
-				// For tick-based mode, reset zone tracking at new bar
 				ResetZoneTracking();
 			}
+
+			// Invalidate zones that have been passed through without reversal (AFTER checking for orders)
+			InvalidateZones();
+
+			// Check for broken support/resistance lines and update them
+			UpdateSupportResistanceLines();
 		}
+
 
 		protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
 		{
@@ -205,10 +305,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private void CheckForReversalDistanceOrders(double currentPrice)
 		{
+			if (ReversalDistancePoints > 0) // Only print tick logs when using tick-based mode
+				Print($"[TICK CHECK Price{currentPrice:F2} Highs{zigZagHighs.Count} Lows{zigZagLows.Count}]");
+
 			// Check ALL ZigZag highs for potential short entries
 			foreach (ZigZagLevel high in zigZagHighs.ToList())
 			{
 				if (tradedHighs.Contains(high.Price))
+					continue;
+
+				// Zone must be active and price must have left zone at least once
+				if (CurrentBar < high.ActivationBar || !high.HasLeftZone)
 					continue;
 
 				// Check if current price is within the proximity zone
@@ -222,8 +329,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 					{
 						inZoneForHigh = true;
 						zoneHighExtremum = currentPrice;
-						Print(string.Format("Tick: Entered HIGH zone at {0} (ZigZag: {1}), starting extremum tracking at {2}",
-							currentPrice, high.Price, zoneHighExtremum));
 					}
 					else
 					{
@@ -235,8 +340,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						// Check for reversal: price drops by ReversalDistancePoints from extremum
 						else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
 						{
-							Print(string.Format("Tick: SHORT Reversal detected! ZigZag HIGH: {0}, Extremum: {1}, Current: {2}, Drop: {3} >= {4}",
-								high.Price, zoneHighExtremum, currentPrice, zoneHighExtremum - currentPrice, ReversalDistancePoints));
+							Print($"[TICK SHORT REVERSAL B{CurrentBar} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
 
 							PlaceShortOrder(high.Price);
 							tradedHighs.Add(high.Price);
@@ -248,7 +352,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				else if (inZoneForHigh)
 				{
 					// Left zone - reset tracking
-					Print(string.Format("Tick: Left HIGH zone (price: {0}, zone: [{1}-{2}])", currentPrice, zoneBottom, zoneTop));
 					inZoneForHigh = false;
 					zoneHighExtremum = 0;
 				}
@@ -258,6 +361,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			foreach (ZigZagLevel low in zigZagLows.ToList())
 			{
 				if (tradedLows.Contains(low.Price))
+					continue;
+
+				// Zone must be active and price must have left zone at least once
+				if (CurrentBar < low.ActivationBar || !low.HasLeftZone)
 					continue;
 
 				// Check if current price is within the proximity zone
@@ -271,8 +378,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 					{
 						inZoneForLow = true;
 						zoneLowExtremum = currentPrice;
-						Print(string.Format("Tick: Entered LOW zone at {0} (ZigZag: {1}), starting extremum tracking at {2}",
-							currentPrice, low.Price, zoneLowExtremum));
 					}
 					else
 					{
@@ -284,8 +389,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						// Check for reversal: price rises by ReversalDistancePoints from extremum
 						else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
 						{
-							Print(string.Format("Tick: LONG Reversal detected! ZigZag LOW: {0}, Extremum: {1}, Current: {2}, Rise: {3} >= {4}",
-								low.Price, zoneLowExtremum, currentPrice, currentPrice - zoneLowExtremum, ReversalDistancePoints));
+							Print($"[TICK LONG REVERSAL B{CurrentBar} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
 
 							PlaceLongOrder(low.Price);
 							tradedLows.Add(low.Price);
@@ -297,7 +401,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				else if (inZoneForLow)
 				{
 					// Left zone - reset tracking
-					Print(string.Format("Tick: Left LOW zone (price: {0}, zone: [{1}-{2}])", currentPrice, zoneBottom, zoneTop));
 					inZoneForLow = false;
 					zoneLowExtremum = 0;
 				}
@@ -330,12 +433,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				if (High[0] >= zoneBottom && High[0] <= zoneTop)
 				{
-					// Check for bearish reversal (candle closes below open)
-					if (Close[0] < Open[0])
+					// For ReversalDistancePoints > 0, check if bar left zone by required distance
+					bool meetsDistanceRequirement = true;
+					if (ReversalDistancePoints > 0)
 					{
-						Print(string.Format("Bar {0}: ZigZag HIGH at {1} (detected bar {2}), High {3} in zone [{4}-{5}], Bearish reversal detected",
-							CurrentBar, high.Price, high.DetectedBar, High[0], zoneBottom, zoneTop));
+						// Bar must have moved below zone bottom by at least ReversalDistancePoints
+						double requiredBreakoutLevel = zoneBottom - ReversalDistancePoints;
+						meetsDistanceRequirement = Low[0] <= requiredBreakoutLevel;
+					}
 
+					if (meetsDistanceRequirement && Close[0] < Open[0])
+					{
 						PlaceShortOrder(high.Price);
 						tradedHighs.Add(high.Price);
 						break; // Only one order at a time
@@ -363,12 +471,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				if (Low[0] >= zoneBottom && Low[0] <= zoneTop)
 				{
-					// Check for bullish reversal (candle closes above open)
-					if (Close[0] > Open[0])
+					// For ReversalDistancePoints > 0, check if bar left zone by required distance
+					bool meetsDistanceRequirement = true;
+					if (ReversalDistancePoints > 0)
 					{
-						Print(string.Format("Bar {0}: ZigZag LOW at {1} (detected bar {2}), Low {3} in zone [{4}-{5}], Bullish reversal detected",
-							CurrentBar, low.Price, low.DetectedBar, Low[0], zoneBottom, zoneTop));
+						// Bar must have moved above zone top by at least ReversalDistancePoints
+						double requiredBreakoutLevel = zoneTop + ReversalDistancePoints;
+						meetsDistanceRequirement = High[0] >= requiredBreakoutLevel;
+					}
 
+					if (meetsDistanceRequirement && Close[0] > Open[0])
+					{
 						PlaceLongOrder(low.Price);
 						tradedLows.Add(low.Price);
 						break; // Only one order at a time
@@ -384,16 +497,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
 				// Standard mode - use SetStopLoss/SetProfitTarget
-				double stopPrice = Close[0] + StopLossPoints;  // Fix: Calculate from entry price, not ZigZag point
+				double stopPrice = Close[0] + StopLossPoints;
 				double targetPrice = Close[0] - ProfitTargetPoints;
 
 				SetStopLoss(signalName, CalculationMode.Price, stopPrice, false);
 				SetProfitTarget(signalName, CalculationMode.Price, targetPrice);
 
-				Print(string.Format("    SHORT Entry: {0}, Stop: {1}, Target: {2}",
-					Close[0], stopPrice, targetPrice));
+				Print($"[TRADE SHORT B{CurrentBar} O{Open[0]:F2}H{High[0]:F2}L{Low[0]:F2}C{Close[0]:F2} Entry{Close[0]:F2} SL{stopPrice:F2} PT{targetPrice:F2}]");
 
-				EnterShort(0, signalName);
+				EnterShort(1, signalName);
 			}
 			else
 			{
@@ -409,16 +521,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
 				// Standard mode - use SetStopLoss/SetProfitTarget
-				double stopPrice = Close[0] - StopLossPoints;  // Fix: Calculate from entry price, not ZigZag point
+				double stopPrice = Close[0] - StopLossPoints;
 				double targetPrice = Close[0] + ProfitTargetPoints;
 
 				SetStopLoss(signalName, CalculationMode.Price, stopPrice, false);
 				SetProfitTarget(signalName, CalculationMode.Price, targetPrice);
 
-				Print(string.Format("    LONG Entry: {0}, Stop: {1}, Target: {2}",
-					Close[0], stopPrice, targetPrice));
+				Print($"[TRADE LONG B{CurrentBar} O{Open[0]:F2}H{High[0]:F2}L{Low[0]:F2}C{Close[0]:F2} Entry{Close[0]:F2} SL{stopPrice:F2} PT{targetPrice:F2}]");
 
-				EnterLong(0, signalName);
+				EnterLong(1, signalName);
 			}
 			else
 			{
@@ -462,23 +573,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 				double zoneTop = high.Price + ZoneAbovePoints;
 				double zoneBottom = high.Price - ZoneBelowPoints;
 
-				// Check if price is currently in zone
-				bool isInZone = High[0] >= zoneBottom && High[0] <= zoneTop;
-
-				// Set HasLeftZone flag if price has left zone at least once
-				if (!isInZone && !high.HasLeftZone)
+				// Set HasLeftZone flag if price has moved DOWN from the zone (Low < zoneBottom)
+				// This means price has left the zone in the direction that would allow a return
+				if (Low[0] < zoneBottom && !high.HasLeftZone)
 				{
 					high.HasLeftZone = true;
-					Print(string.Format("Bar {0}: ZigZag HIGH at {1} - price left zone (High: {2}, zone: [{3}-{4}])",
-						CurrentBar, high.Price, High[0], zoneBottom, zoneTop));
+					high.LeftZoneBar = CurrentBar;
+					Print($"[HIGH ZONE LEFT B{CurrentBar} P{high.Price:F2} Low{Low[0]:F2}]");
 				}
 
 				// Invalidate if price has moved above the zone (passed through without reversal)
-				if (High[0] > zoneTop)
+				// But NOT in the same bar where HasLeftZone was set
+				if (High[0] > zoneTop && high.LeftZoneBar != CurrentBar)
 				{
-					Print(string.Format("Bar {0}: ZigZag HIGH zone at {1} invalidated (price {2} > zone top {3})",
-						CurrentBar, high.Price, High[0], zoneTop));
 					zigZagHighs.Remove(high);
+					Print($"[HIGH ZONE INVALIDATED B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
 				}
 			}
 
@@ -496,23 +605,80 @@ namespace NinjaTrader.NinjaScript.Strategies
 				double zoneTop = low.Price + ZoneBelowPoints;
 				double zoneBottom = low.Price - ZoneAbovePoints;
 
-				// Check if price is currently in zone
-				bool isInZone = Low[0] >= zoneBottom && Low[0] <= zoneTop;
-
-				// Set HasLeftZone flag if price has left zone at least once
-				if (!isInZone && !low.HasLeftZone)
+				// Set HasLeftZone flag if price has moved UP from the zone (High > zoneTop)
+				// This means price has left the zone in the direction that would allow a return
+				if (High[0] > zoneTop && !low.HasLeftZone)
 				{
 					low.HasLeftZone = true;
-					Print(string.Format("Bar {0}: ZigZag LOW at {1} - price left zone (Low: {2}, zone: [{3}-{4}])",
-						CurrentBar, low.Price, Low[0], zoneBottom, zoneTop));
+					low.LeftZoneBar = CurrentBar;
+					Print($"[LOW ZONE LEFT B{CurrentBar} P{low.Price:F2} High{High[0]:F2}]");
 				}
 
 				// Invalidate if price has moved below the zone (passed through without reversal)
-				if (Low[0] < zoneBottom)
+				// But NOT in the same bar where HasLeftZone was set
+				if (Low[0] < zoneBottom && low.LeftZoneBar != CurrentBar)
 				{
-					Print(string.Format("Bar {0}: ZigZag LOW zone at {1} invalidated (price {2} < zone bottom {3})",
-						CurrentBar, low.Price, Low[0], zoneBottom));
 					zigZagLows.Remove(low);
+					Print($"[LOW ZONE INVALIDATED B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
+				}
+			}
+		}
+
+		private void UpdateSupportResistanceLines()
+		{
+			// Extend active support lines (ZigZag highs) to current bar
+			foreach (ZigZagLevel high in zigZagHighs.ToList())
+			{
+				if (!high.IsLineActive)
+					continue; // Already broken
+
+				// Check if price broke above the support level
+				if (High[0] > high.Price)
+				{
+					// Support line is broken - redraw line to end at current bar
+					high.IsLineActive = false;
+					high.LineEndBar = CurrentBar;
+
+					int startBarsAgo = CurrentBar - high.DetectedBar;
+					int endBarsAgo = 0; // Current bar
+					Draw.Line(this, $"SupportLine_{high.DetectedBar}", startBarsAgo, high.Price, endBarsAgo, high.Price, Brushes.Green);
+
+					Print($"[SUPPORT BROKEN B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
+				}
+				else
+				{
+					// Support line still active - extend to current bar
+					int startBarsAgo = CurrentBar - high.DetectedBar;
+					int endBarsAgo = 0; // Current bar
+					Draw.Line(this, $"SupportLine_{high.DetectedBar}", startBarsAgo, high.Price, endBarsAgo, high.Price, Brushes.Green);
+				}
+			}
+
+			// Extend active resistance lines (ZigZag lows) to current bar
+			foreach (ZigZagLevel low in zigZagLows.ToList())
+			{
+				if (!low.IsLineActive)
+					continue; // Already broken
+
+				// Check if price broke below the resistance level
+				if (Low[0] < low.Price)
+				{
+					// Resistance line is broken - redraw line to end at current bar
+					low.IsLineActive = false;
+					low.LineEndBar = CurrentBar;
+
+					int startBarsAgo = CurrentBar - low.DetectedBar;
+					int endBarsAgo = 0; // Current bar
+					Draw.Line(this, $"ResistanceLine_{low.DetectedBar}", startBarsAgo, low.Price, endBarsAgo, low.Price, Brushes.Red);
+
+					Print($"[RESISTANCE BROKEN B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
+				}
+				else
+				{
+					// Resistance line still active - extend to current bar
+					int startBarsAgo = CurrentBar - low.DetectedBar;
+					int endBarsAgo = 0; // Current bar
+					Draw.Line(this, $"ResistanceLine_{low.DetectedBar}", startBarsAgo, low.Price, endBarsAgo, low.Price, Brushes.Red);
 				}
 			}
 		}
@@ -542,6 +708,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				isAtmStrategyCreated = false;
 			}
 		}
+
 
 		#region Properties
 
