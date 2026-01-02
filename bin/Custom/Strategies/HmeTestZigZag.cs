@@ -55,6 +55,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private string orderId = string.Empty;
 		private bool isAtmStrategyCreated = false;
 
+		// Breakeven tracking
+		private bool breakevenSet = false;
+
 		private class ZigZagLevel
 		{
 			public double Price { get; set; }
@@ -94,6 +97,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Risk management in points
 				StopLossPoints = 10.0;
 				ProfitTargetPoints = 15.0;
+				BreakevenPoints = 20.0;  // Move stop to breakeven when 20 points in profit
 
 				// Time filter
 				TradingStartTime = TimeSpan.Parse("00:00");
@@ -238,6 +242,44 @@ namespace NinjaTrader.NinjaScript.Strategies
 						currentExtremum = High[0];
 						extremumBar = CurrentBar;
 					}
+				}
+			}
+
+			// Breakeven management - move stop to breakeven when profit target reached
+			if (BreakevenPoints > 0)
+			{
+				if (Position.MarketPosition == MarketPosition.Long && !breakevenSet)
+				{
+					// Calculate unrealized profit for long position
+					double unrealizedProfit = (Close[0] - Position.AveragePrice);
+
+					if (unrealizedProfit >= BreakevenPoints)
+					{
+						// Move stop to breakeven (entry price + 1 tick)
+						double breakevenPrice = Position.AveragePrice + TickSize;
+						SetStopLoss(CalculationMode.Price, breakevenPrice);
+						breakevenSet = true;
+						Print($"[BREAKEVEN LONG] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+					}
+				}
+				else if (Position.MarketPosition == MarketPosition.Short && !breakevenSet)
+				{
+					// Calculate unrealized profit for short position
+					double unrealizedProfit = (Position.AveragePrice - Close[0]);
+
+					if (unrealizedProfit >= BreakevenPoints)
+					{
+						// Move stop to breakeven (entry price - 1 tick)
+						double breakevenPrice = Position.AveragePrice - TickSize;
+						SetStopLoss(CalculationMode.Price, breakevenPrice);
+						breakevenSet = true;
+						Print($"[BREAKEVEN SHORT] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+					}
+				}
+				else if (Position.MarketPosition == MarketPosition.Flat)
+				{
+					// Reset breakeven flag when position is closed
+					breakevenSet = false;
 				}
 			}
 
@@ -736,8 +778,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "ProfitTargetPoints", Order = 6, GroupName = "Risk Management")]
 		public double ProfitTargetPoints { get; set; }
 
+		[Range(0, double.MaxValue), NinjaScriptProperty]
+		[Display(Name = "BreakevenPoints", Order = 7, GroupName = "Risk Management")]
+		public double BreakevenPoints { get; set; }
+
 		[NinjaScriptProperty]
-		[Display(Name = "TradingStartTime", Order = 7, GroupName = "Time Filter")]
+		[Display(Name = "TradingStartTime", Order = 8, GroupName = "Time Filter")]
 		public TimeSpan TradingStartTime { get; set; }
 
 		[NinjaScriptProperty]
