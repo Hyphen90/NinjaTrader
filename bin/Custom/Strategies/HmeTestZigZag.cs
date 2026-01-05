@@ -152,11 +152,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Print strategy parameters at start
 				Print($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1} RevDist={ReversalDistancePoints:F1}");
 			}
-			else if (State == State.Terminated)
-			{
-				// Clean termination - no custom statistics needed
-				// NinjaTrader will handle all trade metrics automatically
-			}
 		}
 
 		protected override void OnBarUpdate()
@@ -414,11 +409,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 					}
 				}
 			}
-		}
-
-		protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
-		{
-			// Handle execution updates if needed
 		}
 
 		protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
@@ -884,20 +874,36 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "BreakevenPoints", Order = 7, GroupName = "Risk Management")]
 		public double BreakevenPoints { get; set; }
 
+		[XmlIgnore]
 		[NinjaScriptProperty]
 		[Display(Name = "TradingStartTime", Order = 8, GroupName = "Time Filter")]
 		public TimeSpan TradingStartTime { get; set; }
 
+		[Browsable(false)]
+		public string TradingStartTimeSerialize
+		{
+			get { return TradingStartTime.ToString(); }
+			set { TradingStartTime = TimeSpan.Parse(value); }
+		}
+
+		[XmlIgnore]
 		[NinjaScriptProperty]
-		[Display(Name = "TradingEndTime", Order = 8, GroupName = "Time Filter")]
+		[Display(Name = "TradingEndTime", Order = 9, GroupName = "Time Filter")]
 		public TimeSpan TradingEndTime { get; set; }
 
+		[Browsable(false)]
+		public string TradingEndTimeSerialize
+		{
+			get { return TradingEndTime.ToString(); }
+			set { TradingEndTime = TimeSpan.Parse(value); }
+		}
+
 		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "ReversalDistancePoints", Order = 9, GroupName = "Reversal Mode")]
+		[Display(Name = "ReversalDistancePoints", Order = 10, GroupName = "Reversal Mode")]
 		public double ReversalDistancePoints { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "AtmTemplateName", Order = 10, GroupName = "ATM Strategy")]
+		[Display(Name = "AtmTemplateName", Order = 11, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
 
 		#endregion
