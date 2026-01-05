@@ -258,12 +258,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Works for both OnBarClose mode (ReversalDistancePoints = 0) and bar-based distance mode (ReversalDistancePoints > 0)
 				CheckForOrders();
 
-				// For tick-based mode, reset zone tracking at new bar
-				if (ReversalDistancePoints > 0)
-				{
-					ResetZoneTracking();
-				}
-
 				// Invalidate zones that have been passed through without reversal (AFTER checking for orders)
 				InvalidateZones();
 
@@ -272,6 +266,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (BarsInProgress == 1) // Secondary series (Tick) - Precise order management
 			{
+				// Ensure primary series has enough bars before accessing its data
+				if (CurrentBars[0] < BarsRequiredToTrade)
+					return;
+
 				// Safety: Reset orders when position is flat (covers Exit on Session and other edge cases)
 				if (Position.MarketPosition == MarketPosition.Flat && (stopOrder != null || targetOrder != null))
 				{
@@ -308,6 +306,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 					targetOrder = SubmitOrderUnmanaged(1, OrderAction.BuyToCover, OrderType.Limit, Position.Quantity, targetPriceLevel, 0, "ProfitTarget", "");
 
 					Print($"[ORDERS PLACED SHORT TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
+				}
+
+				// Reversal distance order checking on tick series (when ReversalDistancePoints > 0)
+				if (ReversalDistancePoints > 0 && Position.MarketPosition == MarketPosition.Flat)
+				{
+					// Time filter check using primary series
+					DateTime currentTime = Times[0][0];
+					if (currentTime.TimeOfDay >= TradingStartTime && currentTime.TimeOfDay <= TradingEndTime)
+					{
+						// Use current tick price from secondary series
+						double currentPrice = Closes[1][0];
+						CheckForReversalDistanceOrders(currentPrice);
+					}
 				}
 
 				// Breakeven management on tick series for precise execution
@@ -411,27 +422,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 		}
 
-		protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
-		{
-			if (ReversalDistancePoints == 0 || CurrentBar < BarsRequiredToTrade)
-				return;
-
-			// Only process last price updates
-			if (marketDataUpdate.MarketDataType != MarketDataType.Last)
-				return;
-
-			// Time filter check
-			DateTime currentTime = Time[0];
-			if (currentTime.TimeOfDay < TradingStartTime || currentTime.TimeOfDay > TradingEndTime)
-				return;
-
-			// Only trade if flat
-			if (Position.MarketPosition != MarketPosition.Flat)
-				return;
-
-			// Check for reversal distance orders
-			CheckForReversalDistanceOrders(marketDataUpdate.Price);
-		}
 
 		private void CheckForOrders()
 		{
@@ -442,6 +432,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			// Only trade if flat
 			if (Position.MarketPosition != MarketPosition.Flat)
+				return;
+
+			// Skip bar-close checks if using tick-based reversal mode
+			// Tick-based logic runs in OnBarUpdate BarsInProgress==1
+			if (ReversalDistancePoints > 0)
 				return;
 
 			// Check ALL ZigZag high points (potential short entries)
@@ -457,9 +452,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private void CheckForReversalDistanceOrders(double currentPrice)
 		{
-			if (ReversalDistancePoints > 0) // Only print tick logs when using tick-based mode
-				Print($"[TICK CHECK Price{currentPrice:F2} Highs{zigZagHighs.Count} Lows{zigZagLows.Count}]");
-
 			// Check ALL ZigZag highs for potential short entries
 			foreach (ZigZagLevel high in zigZagHighs.ToList())
 			{
@@ -467,43 +459,43 @@ namespace NinjaTrader.NinjaScript.Strategies
 					continue;
 
 				// Zone must be active and price must have left zone at least once
-				if (CurrentBar < high.ActivationBar || !high.HasLeftZone)
+				// Use CurrentBars[0] to reference the primary series bar index
+				if (CurrentBars[0] < high.ActivationBar || !high.HasLeftZone)
 					continue;
 
-				// Check if current price is within the proximity zone
+				// Check if current price is within the proximity zone OR below it (trade direction)
 				double zoneTop = high.Price + ZoneAbovePoints;
 				double zoneBottom = high.Price - ZoneBelowPoints;
 
-				if (currentPrice >= zoneBottom && currentPrice <= zoneTop)
+				// Start tracking when entering zone
+				if (currentPrice >= zoneBottom && currentPrice <= zoneTop && !inZoneForHigh)
 				{
-					// Enter zone - start tracking extremum
-					if (!inZoneForHigh)
+					inZoneForHigh = true;
+					zoneHighExtremum = currentPrice;
+				}
+				
+				// Continue tracking if already in zone OR below zone (trade direction for short)
+				if (inZoneForHigh && currentPrice <= zoneTop)
+				{
+					// Update extremum if price is higher
+					if (currentPrice > zoneHighExtremum)
 					{
-						inZoneForHigh = true;
 						zoneHighExtremum = currentPrice;
 					}
-					else
+					// Check for reversal: price drops by ReversalDistancePoints from extremum
+					else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
 					{
-						// Update extremum if price is higher
-						if (currentPrice > zoneHighExtremum)
-						{
-							zoneHighExtremum = currentPrice;
-						}
-						// Check for reversal: price drops by ReversalDistancePoints from extremum
-						else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
-						{
-							Print($"[TICK SHORT REVERSAL B{CurrentBar} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
+						Print($"[TICK SHORT REVERSAL B{CurrentBars[0]} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
 
-							PlaceShortOrder(high.Price);
-							tradedHighs.Add(high.Price);
-							ResetZoneTracking();
-							break; // Only one order at a time
-						}
+						PlaceShortOrder(high.Price, currentPrice);
+						tradedHighs.Add(high.Price);
+						ResetZoneTracking();
+						break; // Only one order at a time
 					}
 				}
-				else if (inZoneForHigh)
+				else if (inZoneForHigh && currentPrice > zoneTop)
 				{
-					// Left zone - reset tracking
+					// Price moved above zone (wrong direction for short) - reset tracking
 					inZoneForHigh = false;
 					zoneHighExtremum = 0;
 				}
@@ -516,43 +508,43 @@ namespace NinjaTrader.NinjaScript.Strategies
 					continue;
 
 				// Zone must be active and price must have left zone at least once
-				if (CurrentBar < low.ActivationBar || !low.HasLeftZone)
+				// Use CurrentBars[0] to reference the primary series bar index
+				if (CurrentBars[0] < low.ActivationBar || !low.HasLeftZone)
 					continue;
 
-				// Check if current price is within the proximity zone
+				// Check if current price is within the proximity zone OR above it (trade direction)
 				double zoneTop = low.Price + ZoneBelowPoints;
 				double zoneBottom = low.Price - ZoneAbovePoints;
 
-				if (currentPrice >= zoneBottom && currentPrice <= zoneTop)
+				// Start tracking when entering zone
+				if (currentPrice >= zoneBottom && currentPrice <= zoneTop && !inZoneForLow)
 				{
-					// Enter zone - start tracking extremum
-					if (!inZoneForLow)
+					inZoneForLow = true;
+					zoneLowExtremum = currentPrice;
+				}
+				
+				// Continue tracking if already in zone OR above zone (trade direction for long)
+				if (inZoneForLow && currentPrice >= zoneBottom)
+				{
+					// Update extremum if price is lower
+					if (currentPrice < zoneLowExtremum)
 					{
-						inZoneForLow = true;
 						zoneLowExtremum = currentPrice;
 					}
-					else
+					// Check for reversal: price rises by ReversalDistancePoints from extremum
+					else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
 					{
-						// Update extremum if price is lower
-						if (currentPrice < zoneLowExtremum)
-						{
-							zoneLowExtremum = currentPrice;
-						}
-						// Check for reversal: price rises by ReversalDistancePoints from extremum
-						else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
-						{
-							Print($"[TICK LONG REVERSAL B{CurrentBar} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
+						Print($"[TICK LONG REVERSAL B{CurrentBars[0]} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
 
-							PlaceLongOrder(low.Price);
-							tradedLows.Add(low.Price);
-							ResetZoneTracking();
-							break; // Only one order at a time
-						}
+						PlaceLongOrder(low.Price, currentPrice);
+						tradedLows.Add(low.Price);
+						ResetZoneTracking();
+						break; // Only one order at a time
 					}
 				}
-				else if (inZoneForLow)
+				else if (inZoneForLow && currentPrice < zoneBottom)
 				{
-					// Left zone - reset tracking
+					// Price moved below zone (wrong direction for long) - reset tracking
 					inZoneForLow = false;
 					zoneLowExtremum = 0;
 				}
@@ -642,33 +634,51 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 		}
 
+		// Overload for bar-close mode (uses Close[0])
 		private void PlaceShortOrder(double zigZagHigh)
+		{
+			PlaceShortOrder(zigZagHigh, Close[0]);
+		}
+
+		// Main method with entry price parameter (for tick-based mode)
+		private void PlaceShortOrder(double zigZagHigh, double entryPrice)
 		{
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
-				// Unmanaged mode - submit entry order
-				entryOrder = SubmitOrderUnmanaged(0, OrderAction.SellShort, OrderType.Market, 1, Close[0], 0, "ZigZagShort", "");
-				Print($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{Close[0]:F2}]");
+				// Unmanaged mode - submit entry order at specified price on TICK series (index 1)
+				// Use tick series for immediate execution when called from tick-based reversal logic
+				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
+				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.SellShort, OrderType.Market, 1, entryPrice, 0, "ZigZagShort", "");
+				Print($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
 			}
 			else
 			{
 				// ATM mode - create ATM strategy
-				CreateAtmStrategy(OrderAction.Sell, Close[0]);
+				CreateAtmStrategy(OrderAction.Sell, entryPrice);
 			}
 		}
 
+		// Overload for bar-close mode (uses Close[0])
 		private void PlaceLongOrder(double zigZagLow)
+		{
+			PlaceLongOrder(zigZagLow, Close[0]);
+		}
+
+		// Main method with entry price parameter (for tick-based mode)
+		private void PlaceLongOrder(double zigZagLow, double entryPrice)
 		{
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
-				// Unmanaged mode - submit entry order
-				entryOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, OrderType.Market, 1, Close[0], 0, "ZigZagLong", "");
-				Print($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{Close[0]:F2}]");
+				// Unmanaged mode - submit entry order at specified price on TICK series (index 1)
+				// Use tick series for immediate execution when called from tick-based reversal logic
+				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
+				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.Buy, OrderType.Market, 1, entryPrice, 0, "ZigZagLong", "");
+				Print($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
 			}
 			else
 			{
 				// ATM mode - create ATM strategy
-				CreateAtmStrategy(OrderAction.Buy, Close[0]);
+				CreateAtmStrategy(OrderAction.Buy, entryPrice);
 			}
 		}
 
