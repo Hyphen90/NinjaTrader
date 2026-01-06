@@ -63,6 +63,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private Order stopOrder = null;
 		private Order targetOrder = null;
 
+		// Daily max loss tracking
+		private double dailyPnLPoints = 0;
+		private DateTime currentTradingDay = DateTime.MinValue;
+		private bool tradingHaltedToday = false;
+		private double lastEntryPrice = 0;
+
+		// Weekly max loss tracking
+		private double weeklyPnLPoints = 0;
+		private DateTime currentTradingWeek = DateTime.MinValue;
+		private bool tradingHaltedThisWeek = false;
+
 		private class ZigZagLevel
 		{
 			public double Price { get; set; }
@@ -104,6 +115,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				StopLossPoints = 10.0;
 				ProfitTargetPoints = 15.0;
 				BreakevenPoints = 20.0;  // Move stop to breakeven when 20 points in profit
+				DailyMaxLossPoints = 0.0;  // 0 = disabled, >0 = max cumulative loss in points per day
+				WeeklyMaxLossPoints = 0.0;  // 0 = disabled, >0 = max cumulative loss in points per week
 
 				// Time filter
 				TradingStartTime = TimeSpan.Parse("00:00");
@@ -161,6 +174,62 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				if (CurrentBar < BarsRequiredToTrade)
 					return;
+
+				// Daily max loss reset - check for new trading day
+				if (DailyMaxLossPoints > 0 || WeeklyMaxLossPoints > 0)
+				{
+					DateTime barTime = Time[0];
+					
+					// Check if this is a new trading day
+					if (currentTradingDay == DateTime.MinValue || barTime.Date > currentTradingDay.Date)
+					{
+						// New day detected - add previous day's P&L to weekly total BEFORE resetting
+						if (currentTradingDay != DateTime.MinValue && WeeklyMaxLossPoints > 0)
+						{
+							weeklyPnLPoints += dailyPnLPoints;
+							Print($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts | Weekly Total: {weeklyPnLPoints:F2} pts");
+							
+							// Check if weekly max loss reached after adding daily P&L
+							if (weeklyPnLPoints <= -WeeklyMaxLossPoints)
+							{
+								tradingHaltedThisWeek = true;
+								Print($"[TRADING HALTED] Weekly max loss reached! Weekly P&L:{weeklyPnLPoints:F2} pts");
+							}
+						}
+						else if (currentTradingDay != DateTime.MinValue)
+						{
+							Print($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts");
+						}
+						
+						currentTradingDay = barTime.Date;
+						dailyPnLPoints = 0;
+						tradingHaltedToday = false;
+					}
+				}
+
+				// Weekly max loss reset - check for new trading week (Monday)
+				if (WeeklyMaxLossPoints > 0)
+				{
+					DateTime barTime = Time[0];
+					
+					// Get start of week (Monday) for current bar
+					int daysToMonday = ((int)barTime.DayOfWeek - (int)DayOfWeek.Monday + 7) % 7;
+					DateTime weekStart = barTime.Date.AddDays(-daysToMonday);
+					
+					// Check if this is a new trading week
+					if (currentTradingWeek == DateTime.MinValue || weekStart > currentTradingWeek)
+					{
+						// New week detected - reset weekly tracking
+						if (currentTradingWeek != DateTime.MinValue)
+						{
+							Print($"[WEEKLY RESET] New week: {weekStart:yyyy-MM-dd} | Previous P&L: {weeklyPnLPoints:F2} pts");
+						}
+						
+						currentTradingWeek = weekStart;
+						weeklyPnLPoints = 0;
+						tradingHaltedThisWeek = false;
+					}
+				}
 
 				// Custom ZigZag implementation (no repainting!)
 				// NOTE: NO TIME FILTER HERE - Lines should be drawn 24/7 regardless of trading hours
@@ -311,13 +380,22 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Reversal distance order checking on tick series (when ReversalDistancePoints > 0)
 				if (ReversalDistancePoints > 0 && Position.MarketPosition == MarketPosition.Flat)
 				{
-					// Time filter check using primary series
-					DateTime currentTime = Times[0][0];
-					if (currentTime.TimeOfDay >= TradingStartTime && currentTime.TimeOfDay <= TradingEndTime)
+					// Daily/Weekly max loss check - halt trading if limit reached
+					if ((DailyMaxLossPoints > 0 && tradingHaltedToday) || 
+					    (WeeklyMaxLossPoints > 0 && tradingHaltedThisWeek))
 					{
-						// Use current tick price from secondary series
-						double currentPrice = Closes[1][0];
-						CheckForReversalDistanceOrders(currentPrice);
+						// Trading halted - skip reversal checks
+					}
+					else
+					{
+						// Time filter check using primary series
+						DateTime currentTime = Times[0][0];
+						if (currentTime.TimeOfDay >= TradingStartTime && currentTime.TimeOfDay <= TradingEndTime)
+						{
+							// Use current tick price from secondary series
+							double currentPrice = Closes[1][0];
+							CheckForReversalDistanceOrders(currentPrice);
+						}
 					}
 				}
 
@@ -375,6 +453,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				if (orderState == OrderState.Filled)
 				{
+					// Store entry price for P&L calculation
+					lastEntryPrice = Position.AveragePrice;
 					entryOrder = null; // Reset entry order reference
 					Print($"[ENTRY FILLED] Position:{Position.MarketPosition} Entry:{Position.AveragePrice:F2}");
 					// Stop/Target orders will be placed in OnBarUpdate on tick series
@@ -389,6 +469,35 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Stop or target filled - reset all orders
 				if (orderState == OrderState.Filled)
 				{
+					// Calculate P&L in points for daily tracking
+					if ((DailyMaxLossPoints > 0 || WeeklyMaxLossPoints > 0) && lastEntryPrice > 0)
+					{
+						double pnlPoints = 0;
+						
+						// Calculate P&L based on position direction
+						if (order.OrderAction == OrderAction.Sell || order.OrderAction == OrderAction.SellShort)
+						{
+							// Exiting long position
+							pnlPoints = averageFillPrice - lastEntryPrice;
+						}
+						else // Buy or BuyToCover
+						{
+							// Exiting short position
+							pnlPoints = lastEntryPrice - averageFillPrice;
+						}
+						
+						// Update cumulative daily P&L (weekly is calculated from daily totals)
+						dailyPnLPoints += pnlPoints;
+						Print($"[DAILY P&L] Trade:{pnlPoints:F2} pts | Daily Total:{dailyPnLPoints:F2} pts | Weekly Total:{weeklyPnLPoints:F2} pts");
+						
+						// Check if daily max loss reached
+						if (DailyMaxLossPoints > 0 && dailyPnLPoints <= -DailyMaxLossPoints)
+						{
+							tradingHaltedToday = true;
+							Print($"[TRADING HALTED] Daily max loss reached! Daily P&L:{dailyPnLPoints:F2} pts");
+						}
+					}
+					
 					// Cancel remaining orders
 					if (stopOrder != null && stopOrder != order) CancelOrder(stopOrder);
 					if (targetOrder != null && targetOrder != order) CancelOrder(targetOrder);
@@ -396,6 +505,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					stopOrder = null;
 					targetOrder = null;
 					breakevenSet = false; // Reset for next trade
+					lastEntryPrice = 0; // Reset entry price
 					Print($"[EXIT FILLED] Order:{order.Name} AvgFillPrice:{averageFillPrice:F2}");
 				}
 				// Handle cancelled/rejected orders (e.g., Exit on Session)
@@ -433,6 +543,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Only trade if flat
 			if (Position.MarketPosition != MarketPosition.Flat)
 				return;
+
+			// Daily/Weekly max loss check - halt trading if limit reached
+			if ((DailyMaxLossPoints > 0 && tradingHaltedToday) || 
+			    (WeeklyMaxLossPoints > 0 && tradingHaltedThisWeek))
+			{
+				return; // Trading halted
+			}
 
 			// Skip bar-close checks if using tick-based reversal mode
 			// Tick-based logic runs in OnBarUpdate BarsInProgress==1
@@ -884,9 +1001,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "BreakevenPoints", Order = 7, GroupName = "Risk Management")]
 		public double BreakevenPoints { get; set; }
 
+		[Range(0, double.MaxValue), NinjaScriptProperty]
+		[Display(Name = "DailyMaxLossPoints", Order = 8, GroupName = "Risk Management")]
+		public double DailyMaxLossPoints { get; set; }
+
+		[Range(0, double.MaxValue), NinjaScriptProperty]
+		[Display(Name = "WeeklyMaxLossPoints", Order = 9, GroupName = "Risk Management")]
+		public double WeeklyMaxLossPoints { get; set; }
+
 		[XmlIgnore]
 		[NinjaScriptProperty]
-		[Display(Name = "TradingStartTime", Order = 8, GroupName = "Time Filter")]
+		[Display(Name = "TradingStartTime", Order = 10, GroupName = "Time Filter")]
 		public TimeSpan TradingStartTime { get; set; }
 
 		[Browsable(false)]
@@ -898,7 +1023,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[XmlIgnore]
 		[NinjaScriptProperty]
-		[Display(Name = "TradingEndTime", Order = 9, GroupName = "Time Filter")]
+		[Display(Name = "TradingEndTime", Order = 11, GroupName = "Time Filter")]
 		public TimeSpan TradingEndTime { get; set; }
 
 		[Browsable(false)]
@@ -909,11 +1034,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 		}
 
 		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "ReversalDistancePoints", Order = 10, GroupName = "Reversal Mode")]
+		[Display(Name = "ReversalDistancePoints", Order = 12, GroupName = "Reversal Mode")]
 		public double ReversalDistancePoints { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "AtmTemplateName", Order = 11, GroupName = "ATM Strategy")]
+		[Display(Name = "AtmTemplateName", Order = 13, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
 
 		#endregion
