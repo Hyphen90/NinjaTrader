@@ -58,6 +58,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 		// Breakeven tracking
 		private bool breakevenSet = false;
 
+		// Trailing stop tracking
+		private bool trailingActive = false;
+		private double nextTrailingTrigger = 0;
+
 		// Unmanaged order tracking
 		private Order entryOrder = null;
 		private Order stopOrder = null;
@@ -115,6 +119,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				StopLossPoints = 10.0;
 				ProfitTargetPoints = 15.0;
 				BreakevenPoints = 20.0;  // Move stop to breakeven when 20 points in profit
+				TrailingStopPoints = 0.0;  // 0 = disabled, >0 = trail stop every X points
 				DailyMaxLossPoints = 0.0;  // 0 = disabled, >0 = max cumulative loss in points per day
 				WeeklyMaxLossPoints = 0.0;  // 0 = disabled, >0 = max cumulative loss in points per week
 
@@ -417,6 +422,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 							breakevenSet = true;
 							Print($"[BREAKEVEN LONG] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+							
+							// Initialize trailing stop after breakeven is triggered
+							if (TrailingStopPoints > 0 && !trailingActive)
+							{
+								trailingActive = true;
+								nextTrailingTrigger = Closes[1][0] + TrailingStopPoints;
+								Print($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2}");
+							}
 						}
 					}
 					else if (Position.MarketPosition == MarketPosition.Short && !breakevenSet)
@@ -434,12 +447,89 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 							breakevenSet = true;
 							Print($"[BREAKEVEN SHORT] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+							
+							// Initialize trailing stop after breakeven is triggered
+							if (TrailingStopPoints > 0 && !trailingActive)
+							{
+								trailingActive = true;
+								nextTrailingTrigger = Closes[1][0] - TrailingStopPoints;
+								Print($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2}");
+							}
 						}
 					}
 					else if (Position.MarketPosition == MarketPosition.Flat)
 					{
 						// Reset breakeven flag when position is closed
 						breakevenSet = false;
+					}
+				}
+
+				// Trailing stop management on tick series (when TrailingStopPoints > 0)
+				if (TrailingStopPoints > 0 && stopOrder != null)
+				{
+					// For Long positions
+					if (Position.MarketPosition == MarketPosition.Long)
+					{
+						// If breakeven is disabled (0), initialize trailing immediately
+						if (BreakevenPoints == 0 && !trailingActive)
+						{
+							trailingActive = true;
+							nextTrailingTrigger = Position.AveragePrice + TrailingStopPoints;
+							Print($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
+						}
+						
+						// Check if price reached next trailing trigger
+						if (trailingActive && Closes[1][0] >= nextTrailingTrigger)
+						{
+							// Get current stop price from the order
+							double currentStopPrice = stopOrder.StopPrice;
+							
+							// Calculate new stop price (add TrailingStopPoints)
+							double newStopPrice = currentStopPrice + TrailingStopPoints;
+							
+							// Modify stop order
+							ChangeOrder(stopOrder, Position.Quantity, 0, newStopPrice);
+							
+							// Update next trigger level
+							nextTrailingTrigger = Closes[1][0] + TrailingStopPoints;
+							
+							Print($"[TRAILING LONG] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
+						}
+					}
+					// For Short positions
+					else if (Position.MarketPosition == MarketPosition.Short)
+					{
+						// If breakeven is disabled (0), initialize trailing immediately
+						if (BreakevenPoints == 0 && !trailingActive)
+						{
+							trailingActive = true;
+							nextTrailingTrigger = Position.AveragePrice - TrailingStopPoints;
+							Print($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
+						}
+						
+						// Check if price reached next trailing trigger
+						if (trailingActive && Closes[1][0] <= nextTrailingTrigger)
+						{
+							// Get current stop price from the order
+							double currentStopPrice = stopOrder.StopPrice;
+							
+							// Calculate new stop price (subtract TrailingStopPoints)
+							double newStopPrice = currentStopPrice - TrailingStopPoints;
+							
+							// Modify stop order
+							ChangeOrder(stopOrder, Position.Quantity, 0, newStopPrice);
+							
+							// Update next trigger level
+							nextTrailingTrigger = Closes[1][0] - TrailingStopPoints;
+							
+							Print($"[TRAILING SHORT] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
+						}
+					}
+					else if (Position.MarketPosition == MarketPosition.Flat)
+					{
+						// Reset trailing flag when position is closed
+						trailingActive = false;
+						nextTrailingTrigger = 0;
 					}
 				}
 			}
@@ -505,6 +595,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 					stopOrder = null;
 					targetOrder = null;
 					breakevenSet = false; // Reset for next trade
+					trailingActive = false; // Reset trailing for next trade
+					nextTrailingTrigger = 0;
 					lastEntryPrice = 0; // Reset entry price
 					Print($"[EXIT FILLED] Order:{order.Name} AvgFillPrice:{averageFillPrice:F2}");
 				}
@@ -1002,16 +1094,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public double BreakevenPoints { get; set; }
 
 		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "DailyMaxLossPoints", Order = 8, GroupName = "Risk Management")]
+		[Display(Name = "TrailingStopPoints", Order = 8, GroupName = "Risk Management")]
+		public double TrailingStopPoints { get; set; }
+
+		[Range(0, double.MaxValue), NinjaScriptProperty]
+		[Display(Name = "DailyMaxLossPoints", Order = 9, GroupName = "Risk Management")]
 		public double DailyMaxLossPoints { get; set; }
 
 		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "WeeklyMaxLossPoints", Order = 9, GroupName = "Risk Management")]
+		[Display(Name = "WeeklyMaxLossPoints", Order = 10, GroupName = "Risk Management")]
 		public double WeeklyMaxLossPoints { get; set; }
 
 		[XmlIgnore]
 		[NinjaScriptProperty]
-		[Display(Name = "TradingStartTime", Order = 10, GroupName = "Time Filter")]
+		[Display(Name = "TradingStartTime", Order = 11, GroupName = "Time Filter")]
 		public TimeSpan TradingStartTime { get; set; }
 
 		[Browsable(false)]
@@ -1023,7 +1119,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[XmlIgnore]
 		[NinjaScriptProperty]
-		[Display(Name = "TradingEndTime", Order = 11, GroupName = "Time Filter")]
+		[Display(Name = "TradingEndTime", Order = 12, GroupName = "Time Filter")]
 		public TimeSpan TradingEndTime { get; set; }
 
 		[Browsable(false)]
@@ -1034,11 +1130,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 		}
 
 		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "ReversalDistancePoints", Order = 12, GroupName = "Reversal Mode")]
+		[Display(Name = "ReversalDistancePoints", Order = 13, GroupName = "Reversal Mode")]
 		public double ReversalDistancePoints { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "AtmTemplateName", Order = 13, GroupName = "ATM Strategy")]
+		[Display(Name = "AtmTemplateName", Order = 14, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
 
 		#endregion
