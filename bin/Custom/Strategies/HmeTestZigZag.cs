@@ -1129,12 +1129,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			set { TradingEndTime = TimeSpan.Parse(value); }
 		}
 
-		[Range(0, double.MaxValue), NinjaScriptProperty]
-		[Display(Name = "ReversalDistancePoints", Order = 13, GroupName = "Reversal Mode")]
+		[Browsable(false)]
 		public double ReversalDistancePoints { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "AtmTemplateName", Order = 14, GroupName = "ATM Strategy")]
+		[Display(Name = "AtmTemplateName", Order = 13, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
 
 		#endregion
