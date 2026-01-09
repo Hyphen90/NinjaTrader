@@ -130,6 +130,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// ATM Strategy (leave empty for standard mode)
 				AtmTemplateName = string.Empty;
 
+				// Debug settings
+				EnableLogging = false;  // Default: OFF for better performance
+
 				// Add strategy-owned plots for ZigZag visualization (works in Strategy Analyzer)
 				AddPlot(Brushes.Red, "ZigZagHighs");
 				AddPlot(Brushes.Blue, "ZigZagLows");
@@ -168,7 +171,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				AddChartIndicator(displayZigZag);
 
 				// Print strategy parameters at start
-				Print($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1} RevDist={ReversalDistancePoints:F1}");
+				MyPrint($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1} RevDist={ReversalDistancePoints:F1}");
 			}
 		}
 
@@ -192,18 +195,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 						if (currentTradingDay != DateTime.MinValue && WeeklyMaxLossPoints > 0)
 						{
 							weeklyPnLPoints += dailyPnLPoints;
-							Print($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts | Weekly Total: {weeklyPnLPoints:F2} pts");
+							MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts | Weekly Total: {weeklyPnLPoints:F2} pts");
 							
 							// Check if weekly max loss reached after adding daily P&L
 							if (weeklyPnLPoints <= -WeeklyMaxLossPoints)
 							{
 								tradingHaltedThisWeek = true;
-								Print($"[TRADING HALTED] Weekly max loss reached! Weekly P&L:{weeklyPnLPoints:F2} pts");
+								MyPrint($"[TRADING HALTED] Weekly max loss reached! Weekly P&L:{weeklyPnLPoints:F2} pts");
 							}
 						}
 						else if (currentTradingDay != DateTime.MinValue)
 						{
-							Print($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts");
+							MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts");
 						}
 						
 						currentTradingDay = barTime.Date;
@@ -227,7 +230,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						// New week detected - reset weekly tracking
 						if (currentTradingWeek != DateTime.MinValue)
 						{
-							Print($"[WEEKLY RESET] New week: {weekStart:yyyy-MM-dd} | Previous P&L: {weeklyPnLPoints:F2} pts");
+							MyPrint($"[WEEKLY RESET] New week: {weekStart:yyyy-MM-dd} | Previous P&L: {weeklyPnLPoints:F2} pts");
 						}
 						
 						currentTradingWeek = weekStart;
@@ -250,7 +253,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 					currentExtremum = (currentTrend == TrendDirection.Up) ? Low[0] : High[0];
 					extremumBar = CurrentBar;
-					Print($"[TREND INIT {currentTrend} B{CurrentBar} Extremum{currentExtremum:F2}]");
+					MyPrint($"[TREND INIT {currentTrend} B{CurrentBar} Extremum{currentExtremum:F2}]");
 				}
 
 				// Track trend and detect ZigZag points
@@ -283,7 +286,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 							// Draw support line from peak to current bar
 							int barsAgo = CurrentBar - extremumBar;
 							Draw.Line(this, $"SupportLine_{extremumBar}", barsAgo, currentExtremum, 0, currentExtremum, Brushes.Green);
-							Print($"[HIGH CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
+							MyPrint($"[HIGH CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
 
 							// Switch to downtrend
 							currentTrend = TrendDirection.Down;
@@ -318,7 +321,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 							// Draw resistance line from peak to current bar
 							int barsAgo = CurrentBar - extremumBar;
 							Draw.Line(this, $"ResistanceLine_{extremumBar}", barsAgo, currentExtremum, 0, currentExtremum, Brushes.Red);
-							Print($"[LOW CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
+							MyPrint($"[LOW CONFIRMED B{CurrentBar} P{currentExtremum:F2} PeakB{extremumBar}]");
 
 							// Switch to uptrend
 							currentTrend = TrendDirection.Up;
@@ -358,7 +361,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						targetOrder = null;
 					}
 					breakevenSet = false;
-					Print("[RESET] Orders cleared - Position flat");
+					MyPrint("[RESET] Orders cleared - Position flat");
 				}
 				// Place stop/target orders after entry fill (tick-precise)
 				else if (Position.MarketPosition == MarketPosition.Long && stopOrder == null)
@@ -369,7 +372,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					stopOrder = SubmitOrderUnmanaged(1, OrderAction.Sell, OrderType.StopMarket, Position.Quantity, 0, stopPriceLevel, "StopLoss", "");
 					targetOrder = SubmitOrderUnmanaged(1, OrderAction.Sell, OrderType.Limit, Position.Quantity, targetPriceLevel, 0, "ProfitTarget", "");
 
-					Print($"[ORDERS PLACED LONG TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
+					MyPrint($"[ORDERS PLACED LONG TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
 				}
 				else if (Position.MarketPosition == MarketPosition.Short && stopOrder == null)
 				{
@@ -379,7 +382,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					stopOrder = SubmitOrderUnmanaged(1, OrderAction.BuyToCover, OrderType.StopMarket, Position.Quantity, 0, stopPriceLevel, "StopLoss", "");
 					targetOrder = SubmitOrderUnmanaged(1, OrderAction.BuyToCover, OrderType.Limit, Position.Quantity, targetPriceLevel, 0, "ProfitTarget", "");
 
-					Print($"[ORDERS PLACED SHORT TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
+					MyPrint($"[ORDERS PLACED SHORT TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
 				}
 
 				// Reversal distance order checking on tick series (when ReversalDistancePoints > 0)
@@ -421,14 +424,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 							ChangeOrder(stopOrder, Position.Quantity, 0, breakevenPrice);
 
 							breakevenSet = true;
-							Print($"[BREAKEVEN LONG] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+							MyPrint($"[BREAKEVEN LONG] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
 							
 							// Initialize trailing stop after breakeven is triggered
 							if (TrailingStopPoints > 0 && !trailingActive)
 							{
 								trailingActive = true;
 								nextTrailingTrigger = Closes[1][0] + TrailingStopPoints;
-								Print($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2}");
+								MyPrint($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2}");
 							}
 						}
 					}
@@ -446,14 +449,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 							ChangeOrder(stopOrder, Position.Quantity, 0, breakevenPrice);
 
 							breakevenSet = true;
-							Print($"[BREAKEVEN SHORT] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
+							MyPrint($"[BREAKEVEN SHORT] Stop moved to {breakevenPrice:F2} (Entry: {Position.AveragePrice:F2})");
 							
 							// Initialize trailing stop after breakeven is triggered
 							if (TrailingStopPoints > 0 && !trailingActive)
 							{
 								trailingActive = true;
 								nextTrailingTrigger = Closes[1][0] - TrailingStopPoints;
-								Print($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2}");
+								MyPrint($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2}");
 							}
 						}
 					}
@@ -475,7 +478,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						{
 							trailingActive = true;
 							nextTrailingTrigger = Position.AveragePrice + TrailingStopPoints;
-							Print($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
+							MyPrint($"[TRAILING INITIALIZED LONG] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
 						}
 						
 						// Check if price reached next trailing trigger
@@ -493,7 +496,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 							// Update next trigger level
 							nextTrailingTrigger = Closes[1][0] + TrailingStopPoints;
 							
-							Print($"[TRAILING LONG] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
+							MyPrint($"[TRAILING LONG] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
 						}
 					}
 					// For Short positions
@@ -504,7 +507,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 						{
 							trailingActive = true;
 							nextTrailingTrigger = Position.AveragePrice - TrailingStopPoints;
-							Print($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
+							MyPrint($"[TRAILING INITIALIZED SHORT] Next trigger: {nextTrailingTrigger:F2} (No Breakeven)");
 						}
 						
 						// Check if price reached next trailing trigger
@@ -522,7 +525,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 							// Update next trigger level
 							nextTrailingTrigger = Closes[1][0] - TrailingStopPoints;
 							
-							Print($"[TRAILING SHORT] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
+							MyPrint($"[TRAILING SHORT] Stop: {currentStopPrice:F2} -> {newStopPrice:F2} | Next trigger: {nextTrailingTrigger:F2}");
 						}
 					}
 					else if (Position.MarketPosition == MarketPosition.Flat)
@@ -546,7 +549,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					// Store entry price for P&L calculation
 					lastEntryPrice = Position.AveragePrice;
 					entryOrder = null; // Reset entry order reference
-					Print($"[ENTRY FILLED] Position:{Position.MarketPosition} Entry:{Position.AveragePrice:F2}");
+					MyPrint($"[ENTRY FILLED] Position:{Position.MarketPosition} Entry:{Position.AveragePrice:F2}");
 					// Stop/Target orders will be placed in OnBarUpdate on tick series
 				}
 				else if (orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
@@ -578,13 +581,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 						
 						// Update cumulative daily P&L (weekly is calculated from daily totals)
 						dailyPnLPoints += pnlPoints;
-						Print($"[DAILY P&L] Trade:{pnlPoints:F2} pts | Daily Total:{dailyPnLPoints:F2} pts | Weekly Total:{weeklyPnLPoints:F2} pts");
+						MyPrint($"[DAILY P&L] Trade:{pnlPoints:F2} pts | Daily Total:{dailyPnLPoints:F2} pts | Weekly Total:{weeklyPnLPoints:F2} pts");
 						
 						// Check if daily max loss reached
 						if (DailyMaxLossPoints > 0 && dailyPnLPoints <= -DailyMaxLossPoints)
 						{
 							tradingHaltedToday = true;
-							Print($"[TRADING HALTED] Daily max loss reached! Daily P&L:{dailyPnLPoints:F2} pts");
+							MyPrint($"[TRADING HALTED] Daily max loss reached! Daily P&L:{dailyPnLPoints:F2} pts");
 						}
 					}
 					
@@ -598,7 +601,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					trailingActive = false; // Reset trailing for next trade
 					nextTrailingTrigger = 0;
 					lastEntryPrice = 0; // Reset entry price
-					Print($"[EXIT FILLED] Order:{order.Name} AvgFillPrice:{averageFillPrice:F2}");
+					MyPrint($"[EXIT FILLED] Order:{order.Name} AvgFillPrice:{averageFillPrice:F2}");
 				}
 				// Handle cancelled/rejected orders (e.g., Exit on Session)
 				else if (orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
@@ -606,19 +609,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (order == stopOrder)
 					{
 						stopOrder = null;
-						Print($"[STOP CANCELLED] Order:{order.Name}");
+						MyPrint($"[STOP CANCELLED] Order:{order.Name}");
 					}
 					if (order == targetOrder)
 					{
 						targetOrder = null;
-						Print($"[TARGET CANCELLED] Order:{order.Name}");
+						MyPrint($"[TARGET CANCELLED] Order:{order.Name}");
 					}
 					
 					// Reset breakeven flag when both orders are cleared
 					if (stopOrder == null && targetOrder == null)
 					{
 						breakevenSet = false;
-						Print($"[ORDERS RESET] All exit orders cleared");
+						MyPrint($"[ORDERS RESET] All exit orders cleared");
 					}
 				}
 			}
@@ -694,7 +697,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					// Check for reversal: price drops by ReversalDistancePoints from extremum
 					else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
 					{
-						Print($"[TICK SHORT REVERSAL B{CurrentBars[0]} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
+						MyPrint($"[TICK SHORT REVERSAL B{CurrentBars[0]} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
 
 						PlaceShortOrder(high.Price, currentPrice);
 						tradedHighs.Add(high.Price);
@@ -743,7 +746,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					// Check for reversal: price rises by ReversalDistancePoints from extremum
 					else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
 					{
-						Print($"[TICK LONG REVERSAL B{CurrentBars[0]} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
+						MyPrint($"[TICK LONG REVERSAL B{CurrentBars[0]} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
 
 						PlaceLongOrder(low.Price, currentPrice);
 						tradedLows.Add(low.Price);
@@ -858,7 +861,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Use tick series for immediate execution when called from tick-based reversal logic
 				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
 				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.SellShort, OrderType.Market, 1, entryPrice, 0, "ZigZagShort", "");
-				Print($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
+				MyPrint($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
 			}
 			else
 			{
@@ -882,7 +885,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Use tick series for immediate execution when called from tick-based reversal logic
 				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
 				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.Buy, OrderType.Market, 1, entryPrice, 0, "ZigZagLong", "");
-				Print($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
+				MyPrint($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
 			}
 			else
 			{
@@ -904,7 +907,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (atmCallbackErrorCode == ErrorCode.NoError && atmCallBackId == atmStrategyId)
 					{
 						isAtmStrategyCreated = true;
-						Print("ATM Strategy created successfully: " + atmStrategyId);
+						MyPrint("ATM Strategy created successfully: " + atmStrategyId);
 					}
 				});
 			}
@@ -932,7 +935,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				{
 					high.HasLeftZone = true;
 					high.LeftZoneBar = CurrentBar;
-					Print($"[HIGH ZONE LEFT B{CurrentBar} P{high.Price:F2} Low{Low[0]:F2}]");
+					MyPrint($"[HIGH ZONE LEFT B{CurrentBar} P{high.Price:F2} Low{Low[0]:F2}]");
 				}
 
 				// Invalidate if price has moved above the zone (passed through without reversal)
@@ -940,7 +943,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (High[0] > zoneTop && high.LeftZoneBar != CurrentBar)
 				{
 					zigZagHighs.Remove(high);
-					Print($"[HIGH ZONE INVALIDATED B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
+					MyPrint($"[HIGH ZONE INVALIDATED B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
 				}
 			}
 
@@ -964,7 +967,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				{
 					low.HasLeftZone = true;
 					low.LeftZoneBar = CurrentBar;
-					Print($"[LOW ZONE LEFT B{CurrentBar} P{low.Price:F2} High{High[0]:F2}]");
+					MyPrint($"[LOW ZONE LEFT B{CurrentBar} P{low.Price:F2} High{High[0]:F2}]");
 				}
 
 				// Invalidate if price has moved below the zone (passed through without reversal)
@@ -972,7 +975,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (Low[0] < zoneBottom && low.LeftZoneBar != CurrentBar)
 				{
 					zigZagLows.Remove(low);
-					Print($"[LOW ZONE INVALIDATED B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
+					MyPrint($"[LOW ZONE INVALIDATED B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
 				}
 			}
 		}
@@ -996,7 +999,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					int endBarsAgo = 0; // Current bar
 					Draw.Line(this, $"SupportLine_{high.DetectedBar}", startBarsAgo, high.Price, endBarsAgo, high.Price, Brushes.Green);
 
-					Print($"[SUPPORT BROKEN B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
+					MyPrint($"[SUPPORT BROKEN B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
 				}
 				else
 				{
@@ -1024,7 +1027,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					int endBarsAgo = 0; // Current bar
 					Draw.Line(this, $"ResistanceLine_{low.DetectedBar}", startBarsAgo, low.Price, endBarsAgo, low.Price, Brushes.Red);
 
-					Print($"[RESISTANCE BROKEN B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
+					MyPrint($"[RESISTANCE BROKEN B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
 				}
 				else
 				{
@@ -1060,6 +1063,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 				atmStrategyId = string.Empty;
 				isAtmStrategyCreated = false;
 			}
+		}
+
+		// Custom Print method with logging control
+		private void MyPrint(string message)
+		{
+			if (EnableLogging)
+				Print(message);
 		}
 
 
@@ -1135,6 +1145,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[NinjaScriptProperty]
 		[Display(Name = "AtmTemplateName", Order = 13, GroupName = "ATM Strategy")]
 		public string AtmTemplateName { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Enable Logging", Order = 14, GroupName = "Debug")]
+		public bool EnableLogging { get; set; }
 
 		#endregion
 	}
