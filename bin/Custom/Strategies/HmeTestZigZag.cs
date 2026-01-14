@@ -30,6 +30,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public class HmeTestZigZag : Strategy
 	{
+		// Entry mode selection
+		public enum EntryMode { BarReversal, LimitEntry }
+		
+		// Secondary data series type selection
+		public enum SecondarySeriesType { Tick, Second }
+		
 		// Custom ZigZag implementation (no repainting!)
 		private enum TrendDirection { Up, Down, Unknown }
 		private TrendDirection currentTrend = TrendDirection.Unknown;
@@ -43,12 +49,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 		// Track traded ZigZag points separately for highs and lows
 		private HashSet<double> tradedHighs = new HashSet<double>();
 		private HashSet<double> tradedLows = new HashSet<double>();
-
-		// Reversal distance tracking variables
-		private double zoneHighExtremum = 0;
-		private double zoneLowExtremum = 0;
-		private bool inZoneForHigh = false;
-		private bool inZoneForLow = false;
 
 		// ATM Strategy variables
 		private string atmStrategyId = string.Empty;
@@ -66,6 +66,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private Order entryOrder = null;
 		private Order stopOrder = null;
 		private Order targetOrder = null;
+		
+		// Limit order tracking (for LimitEntry mode)
+		private Order pendingLimitOrderLong = null;
+		private Order pendingLimitOrderShort = null;
+		private double pendingLimitPriceLong = 0;
+		private double pendingLimitPriceShort = 0;
 
 		// Daily max loss tracking
 		private double dailyPnLPoints = 0;
@@ -77,6 +83,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private double weeklyPnLPoints = 0;
 		private DateTime currentTradingWeek = DateTime.MinValue;
 		private bool tradingHaltedThisWeek = false;
+
+		// Performance measurement
+		private System.Diagnostics.Stopwatch performanceTimer;
 
 		private class ZigZagLevel
 		{
@@ -104,6 +113,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 				BarsRequiredToTrade = 20;
 				IsUnmanaged = true;  // Enable unmanaged order management for full control
 
+				// Entry mode
+				EntryModeSelected = EntryMode.BarReversal;  // Default: Bar Reversal mode
+				SecondaryDataSeriesType = SecondarySeriesType.Second;  // Default: 1 Second bars
+
 				// ZigZag parameters
 				DeviationValue = 60.0;  // Default 60 points
 				UseHighLow = true;
@@ -111,9 +124,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Proximity zone parameters
 				ZoneAbovePoints = 2.0;
 				ZoneBelowPoints = 2.0;
-
-				// Reversal distance parameter (0 = OnBarClose mode, >0 = tick-based reversal mode)
-				ReversalDistancePoints = 0.0;
 
 				// Risk management in points
 				StopLossPoints = 10.0;
@@ -142,8 +152,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (State == State.Configure)
 			{
-				// Add secondary tick series for precise breakeven management
-				AddDataSeries(BarsPeriodType.Tick, 1);
+				// Add secondary data series for precise breakeven management
+				// Type is configurable: Tick or Second
+				if (SecondaryDataSeriesType == SecondarySeriesType.Tick)
+					AddDataSeries(BarsPeriodType.Tick, 1);
+				else
+					AddDataSeries(BarsPeriodType.Second, 1);
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -155,10 +169,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				currentTrend = TrendDirection.Unknown;
 				currentExtremum = 0;
 				extremumBar = -1;
-				zoneHighExtremum = 0;
-				zoneLowExtremum = 0;
-				inZoneForHigh = false;
-				inZoneForLow = false;
 				atmStrategyId = string.Empty;
 				orderId = string.Empty;
 				isAtmStrategyCreated = false;
@@ -171,7 +181,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 				AddChartIndicator(displayZigZag);
 
 				// Print strategy parameters at start
-				MyPrint($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1} RevDist={ReversalDistancePoints:F1}");
+				MyPrint($"[START] Deviation={DeviationValue:F1} ZoneAbove={ZoneAbovePoints:F1} ZoneBelow={ZoneBelowPoints:F1} SL={StopLossPoints:F1} PT={ProfitTargetPoints:F1}");
+				
+				// Start performance timer
+				performanceTimer = System.Diagnostics.Stopwatch.StartNew();
+				//Print($"[PERFORMANCE] Strategy started at {DateTime.Now:HH:mm:ss.fff}");
+			}
+			else if (State == State.Terminated)
+			{
+				// Stop performance timer and output execution time
+				if (performanceTimer != null)
+				{
+					performanceTimer.Stop();
+					double elapsedSeconds = performanceTimer.Elapsed.TotalSeconds;
+					Print($"[PERFORMANCE] Strategy execution time: {elapsedSeconds:F3} sec");
+				}
 			}
 		}
 
@@ -184,41 +208,48 @@ namespace NinjaTrader.NinjaScript.Strategies
 					return;
 
 				// Daily max loss reset - check for new trading day
-				if (DailyMaxLossPoints > 0 || WeeklyMaxLossPoints > 0)
+				DateTime barTime = Time[0];
+				bool isNewTradingDay = false;
+				
+				if (currentTradingDay == DateTime.MinValue || barTime.Date > currentTradingDay.Date)
 				{
-					DateTime barTime = Time[0];
+					isNewTradingDay = true;
 					
-					// Check if this is a new trading day
-					if (currentTradingDay == DateTime.MinValue || barTime.Date > currentTradingDay.Date)
+					// New day detected - add previous day's P&L to weekly total BEFORE resetting
+					if (currentTradingDay != DateTime.MinValue && WeeklyMaxLossPoints > 0)
 					{
-						// New day detected - add previous day's P&L to weekly total BEFORE resetting
-						if (currentTradingDay != DateTime.MinValue && WeeklyMaxLossPoints > 0)
-						{
-							weeklyPnLPoints += dailyPnLPoints;
-							MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts | Weekly Total: {weeklyPnLPoints:F2} pts");
-							
-							// Check if weekly max loss reached after adding daily P&L
-							if (weeklyPnLPoints <= -WeeklyMaxLossPoints)
-							{
-								tradingHaltedThisWeek = true;
-								MyPrint($"[TRADING HALTED] Weekly max loss reached! Weekly P&L:{weeklyPnLPoints:F2} pts");
-							}
-						}
-						else if (currentTradingDay != DateTime.MinValue)
-						{
-							MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts");
-						}
+						weeklyPnLPoints += dailyPnLPoints;
+						MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts | Weekly Total: {weeklyPnLPoints:F2} pts");
 						
-						currentTradingDay = barTime.Date;
-						dailyPnLPoints = 0;
-						tradingHaltedToday = false;
+						// Check if weekly max loss reached after adding daily P&L
+						if (weeklyPnLPoints <= -WeeklyMaxLossPoints)
+						{
+							tradingHaltedThisWeek = true;
+							MyPrint($"[TRADING HALTED] Weekly max loss reached! Weekly P&L:{weeklyPnLPoints:F2} pts");
+						}
+					}
+					else if (currentTradingDay != DateTime.MinValue)
+					{
+						MyPrint($"[DAILY RESET] New day: {barTime.Date:yyyy-MM-dd} | Previous Day P&L: {dailyPnLPoints:F2} pts");
+					}
+					
+					currentTradingDay = barTime.Date;
+					dailyPnLPoints = 0;
+					tradingHaltedToday = false;
+					
+					// Cancel limit orders from previous day (they expire with TimeInForce.Day anyway)
+					// This ensures clean state for new trading day
+					if (EntryModeSelected == EntryMode.LimitEntry && Position.MarketPosition == MarketPosition.Flat)
+					{
+						CancelAllPendingLimitOrders();
+						MyPrint($"[NEW DAY] Limit orders cancelled for new trading day");
 					}
 				}
 
 				// Weekly max loss reset - check for new trading week (Monday)
 				if (WeeklyMaxLossPoints > 0)
 				{
-					DateTime barTime = Time[0];
+					// barTime already declared above, reuse it
 					
 					// Get start of week (Monday) for current bar
 					int daysToMonday = ((int)barTime.DayOfWeek - (int)DayOfWeek.Monday + 7) % 7;
@@ -385,28 +416,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 					MyPrint($"[ORDERS PLACED SHORT TICK] Stop:{stopPriceLevel:F2} Target:{targetPriceLevel:F2}");
 				}
 
-				// Reversal distance order checking on tick series (when ReversalDistancePoints > 0)
-				if (ReversalDistancePoints > 0 && Position.MarketPosition == MarketPosition.Flat)
-				{
-					// Daily/Weekly max loss check - halt trading if limit reached
-					if ((DailyMaxLossPoints > 0 && tradingHaltedToday) || 
-					    (WeeklyMaxLossPoints > 0 && tradingHaltedThisWeek))
-					{
-						// Trading halted - skip reversal checks
-					}
-					else
-					{
-						// Time filter check using primary series
-						DateTime currentTime = Times[0][0];
-						if (currentTime.TimeOfDay >= TradingStartTime && currentTime.TimeOfDay <= TradingEndTime)
-						{
-							// Use current tick price from secondary series
-							double currentPrice = Closes[1][0];
-							CheckForReversalDistanceOrders(currentPrice);
-						}
-					}
-				}
-
 				// Breakeven management on tick series for precise execution
 				if (BreakevenPoints > 0 && stopOrder != null)
 				{
@@ -541,8 +550,66 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string nativeError)
 		{
-			// Track order state changes
-			if (order == entryOrder)
+			// Track order state changes for limit entry orders (LimitEntry mode)
+			if (order == pendingLimitOrderLong || order == pendingLimitOrderShort)
+			{
+				if (orderState == OrderState.Filled)
+				{
+					// IMPORTANT: Save ZigZag price BEFORE cancelling orders (which resets prices to 0)
+					double filledZigZagPrice = 0;
+					bool isLongFill = (order == pendingLimitOrderLong);
+					
+					if (isLongFill)
+					{
+						filledZigZagPrice = pendingLimitPriceLong;
+						tradedLows.Add(filledZigZagPrice);
+						MyPrint($"[LIMIT LONG FILLED] ZigZag:{filledZigZagPrice:F2} Entry:{averageFillPrice:F2}");
+					}
+					else // pendingLimitOrderShort
+					{
+						filledZigZagPrice = pendingLimitPriceShort;
+						tradedHighs.Add(filledZigZagPrice);
+						MyPrint($"[LIMIT SHORT FILLED] ZigZag:{filledZigZagPrice:F2} Entry:{averageFillPrice:F2}");
+					}
+					
+					// NOW cancel other pending limit orders (this will reset prices to 0)
+					CancelAllPendingLimitOrders();
+					
+					// Reset the filled order references
+					if (isLongFill)
+					{
+						pendingLimitOrderLong = null;
+						pendingLimitPriceLong = 0;
+					}
+					else
+					{
+						pendingLimitOrderShort = null;
+						pendingLimitPriceShort = 0;
+					}
+					
+					// Store entry price for P&L calculation
+					lastEntryPrice = Position.AveragePrice;
+					// Stop/Target orders will be placed in OnBarUpdate on tick series
+				}
+				else if (orderState == OrderState.Cancelled || orderState == OrderState.Rejected)
+				{
+					// Reset cancelled/rejected limit order
+					if (order == pendingLimitOrderLong)
+					{
+						MyPrint($"[LIMIT LONG CANCELLED/REJECTED] ZigZag:{pendingLimitPriceLong:F2}");
+						pendingLimitOrderLong = null;
+						pendingLimitPriceLong = 0;
+					}
+					else // pendingLimitOrderShort
+					{
+						MyPrint($"[LIMIT SHORT CANCELLED/REJECTED] ZigZag:{pendingLimitPriceShort:F2}");
+						pendingLimitOrderShort = null;
+						pendingLimitPriceShort = 0;
+					}
+				}
+			}
+			// Track order state changes for market entry orders (BarReversal mode)
+			else if (order == entryOrder)
 			{
 				if (orderState == OrderState.Filled)
 				{
@@ -646,129 +713,29 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return; // Trading halted
 			}
 
-			// Skip bar-close checks if using tick-based reversal mode
-			// Tick-based logic runs in OnBarUpdate BarsInProgress==1
-			if (ReversalDistancePoints > 0)
-				return;
-
-			// Check ALL ZigZag high points (potential short entries)
-			CheckZigZagHighs();
-
-			// Check ALL ZigZag low points (potential long entries)
-			CheckZigZagLows();
-
-			// Handle ATM strategy if configured and running live
-			if (!string.IsNullOrEmpty(AtmTemplateName) && State != State.Historical)
-				HandleAtmStrategy();
-		}
-
-		private void CheckForReversalDistanceOrders(double currentPrice)
-		{
-			// Check ALL ZigZag highs for potential short entries
-			foreach (ZigZagLevel high in zigZagHighs.ToList())
+			// Check entry mode
+			if (EntryModeSelected == EntryMode.LimitEntry)
 			{
-				if (tradedHighs.Contains(high.Price))
-					continue;
-
-				// Zone must be active and price must have left zone at least once
-				// Use CurrentBars[0] to reference the primary series bar index
-				if (CurrentBars[0] < high.ActivationBar || !high.HasLeftZone)
-					continue;
-
-				// Check if current price is within the proximity zone OR below it (trade direction)
-				double zoneTop = high.Price + ZoneAbovePoints;
-				double zoneBottom = high.Price - ZoneBelowPoints;
-
-				// Start tracking when entering zone
-				if (currentPrice >= zoneBottom && currentPrice <= zoneTop && !inZoneForHigh)
+				// Limit Entry Mode: Place limit orders at next ZigZag points
+				// Only place new orders if no pending limit orders exist
+				if (pendingLimitOrderLong == null && pendingLimitOrderShort == null)
 				{
-					inZoneForHigh = true;
-					zoneHighExtremum = currentPrice;
-				}
-				
-				// Continue tracking if already in zone OR below zone (trade direction for short)
-				if (inZoneForHigh && currentPrice <= zoneTop)
-				{
-					// Update extremum if price is higher
-					if (currentPrice > zoneHighExtremum)
-					{
-						zoneHighExtremum = currentPrice;
-					}
-					// Check for reversal: price drops by ReversalDistancePoints from extremum
-					else if (zoneHighExtremum - currentPrice >= ReversalDistancePoints)
-					{
-						MyPrint($"[TICK SHORT REVERSAL B{CurrentBars[0]} P{high.Price:F2} Extremum{zoneHighExtremum:F2} Current{currentPrice:F2} Drop{zoneHighExtremum - currentPrice:F2}]");
-
-						PlaceShortOrder(high.Price, currentPrice);
-						tradedHighs.Add(high.Price);
-						ResetZoneTracking();
-						break; // Only one order at a time
-					}
-				}
-				else if (inZoneForHigh && currentPrice > zoneTop)
-				{
-					// Price moved above zone (wrong direction for short) - reset tracking
-					inZoneForHigh = false;
-					zoneHighExtremum = 0;
+					PlaceLimitOrdersPair();
 				}
 			}
-
-			// Check ALL ZigZag lows for potential long entries
-			foreach (ZigZagLevel low in zigZagLows.ToList())
+			else // BarReversal mode
 			{
-				if (tradedLows.Contains(low.Price))
-					continue;
+				// Bar Reversal Mode: Original behavior
+				// Check ALL ZigZag high points (potential short entries)
+				CheckZigZagHighs();
 
-				// Zone must be active and price must have left zone at least once
-				// Use CurrentBars[0] to reference the primary series bar index
-				if (CurrentBars[0] < low.ActivationBar || !low.HasLeftZone)
-					continue;
+				// Check ALL ZigZag low points (potential long entries)
+				CheckZigZagLows();
 
-				// Check if current price is within the proximity zone OR above it (trade direction)
-				double zoneTop = low.Price + ZoneBelowPoints;
-				double zoneBottom = low.Price - ZoneAbovePoints;
-
-				// Start tracking when entering zone
-				if (currentPrice >= zoneBottom && currentPrice <= zoneTop && !inZoneForLow)
-				{
-					inZoneForLow = true;
-					zoneLowExtremum = currentPrice;
-				}
-				
-				// Continue tracking if already in zone OR above zone (trade direction for long)
-				if (inZoneForLow && currentPrice >= zoneBottom)
-				{
-					// Update extremum if price is lower
-					if (currentPrice < zoneLowExtremum)
-					{
-						zoneLowExtremum = currentPrice;
-					}
-					// Check for reversal: price rises by ReversalDistancePoints from extremum
-					else if (currentPrice - zoneLowExtremum >= ReversalDistancePoints)
-					{
-						MyPrint($"[TICK LONG REVERSAL B{CurrentBars[0]} P{low.Price:F2} Extremum{zoneLowExtremum:F2} Current{currentPrice:F2} Rise{currentPrice - zoneLowExtremum:F2}]");
-
-						PlaceLongOrder(low.Price, currentPrice);
-						tradedLows.Add(low.Price);
-						ResetZoneTracking();
-						break; // Only one order at a time
-					}
-				}
-				else if (inZoneForLow && currentPrice < zoneBottom)
-				{
-					// Price moved below zone (wrong direction for long) - reset tracking
-					inZoneForLow = false;
-					zoneLowExtremum = 0;
-				}
+				// Handle ATM strategy if configured and running live
+				if (!string.IsNullOrEmpty(AtmTemplateName) && State != State.Historical)
+					HandleAtmStrategy();
 			}
-		}
-
-		private void ResetZoneTracking()
-		{
-			inZoneForHigh = false;
-			inZoneForLow = false;
-			zoneHighExtremum = 0;
-			zoneLowExtremum = 0;
 		}
 
 		private void CheckZigZagHighs()
@@ -787,23 +754,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				double zoneTop = high.Price + ZoneAbovePoints;
 				double zoneBottom = high.Price - ZoneBelowPoints;
 
-				if (High[0] >= zoneBottom && High[0] <= zoneTop)
+				if (High[0] >= zoneBottom && High[0] <= zoneTop && Close[0] < Open[0])
 				{
-					// For ReversalDistancePoints > 0, check if bar left zone by required distance
-					bool meetsDistanceRequirement = true;
-					if (ReversalDistancePoints > 0)
-					{
-						// Bar must have moved below zone bottom by at least ReversalDistancePoints
-						double requiredBreakoutLevel = zoneBottom - ReversalDistancePoints;
-						meetsDistanceRequirement = Low[0] <= requiredBreakoutLevel;
-					}
-
-					if (meetsDistanceRequirement && Close[0] < Open[0])
-					{
-						PlaceShortOrder(high.Price);
-						tradedHighs.Add(high.Price);
-						break; // Only one order at a time
-					}
+					PlaceShortOrder(high.Price);
+					tradedHighs.Add(high.Price);
+					break; // Only one order at a time
 				}
 			}
 		}
@@ -825,72 +780,42 @@ namespace NinjaTrader.NinjaScript.Strategies
 				double zoneTop = low.Price + ZoneBelowPoints;
 				double zoneBottom = low.Price - ZoneAbovePoints;
 
-				if (Low[0] >= zoneBottom && Low[0] <= zoneTop)
+				if (Low[0] >= zoneBottom && Low[0] <= zoneTop && Close[0] > Open[0])
 				{
-					// For ReversalDistancePoints > 0, check if bar left zone by required distance
-					bool meetsDistanceRequirement = true;
-					if (ReversalDistancePoints > 0)
-					{
-						// Bar must have moved above zone top by at least ReversalDistancePoints
-						double requiredBreakoutLevel = zoneTop + ReversalDistancePoints;
-						meetsDistanceRequirement = High[0] >= requiredBreakoutLevel;
-					}
-
-					if (meetsDistanceRequirement && Close[0] > Open[0])
-					{
-						PlaceLongOrder(low.Price);
-						tradedLows.Add(low.Price);
-						break; // Only one order at a time
-					}
+					PlaceLongOrder(low.Price);
+					tradedLows.Add(low.Price);
+					break; // Only one order at a time
 				}
 			}
 		}
 
-		// Overload for bar-close mode (uses Close[0])
 		private void PlaceShortOrder(double zigZagHigh)
 		{
-			PlaceShortOrder(zigZagHigh, Close[0]);
-		}
-
-		// Main method with entry price parameter (for tick-based mode)
-		private void PlaceShortOrder(double zigZagHigh, double entryPrice)
-		{
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
-				// Unmanaged mode - submit entry order at specified price on TICK series (index 1)
-				// Use tick series for immediate execution when called from tick-based reversal logic
-				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
-				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.SellShort, OrderType.Market, 1, entryPrice, 0, "ZigZagShort", "");
-				MyPrint($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
+				// Unmanaged mode - submit entry order on primary series (index 0)
+				entryOrder = SubmitOrderUnmanaged(0, OrderAction.SellShort, OrderType.Market, 1, Close[0], 0, "ZigZagShort", "");
+				MyPrint($"[ENTRY SHORT SUBMITTED B{CurrentBar} Price{Close[0]:F2}]");
 			}
 			else
 			{
 				// ATM mode - create ATM strategy
-				CreateAtmStrategy(OrderAction.Sell, entryPrice);
+				CreateAtmStrategy(OrderAction.Sell, Close[0]);
 			}
 		}
 
-		// Overload for bar-close mode (uses Close[0])
 		private void PlaceLongOrder(double zigZagLow)
 		{
-			PlaceLongOrder(zigZagLow, Close[0]);
-		}
-
-		// Main method with entry price parameter (for tick-based mode)
-		private void PlaceLongOrder(double zigZagLow, double entryPrice)
-		{
 			if (string.IsNullOrEmpty(AtmTemplateName) || State == State.Historical)
 			{
-				// Unmanaged mode - submit entry order at specified price on TICK series (index 1)
-				// Use tick series for immediate execution when called from tick-based reversal logic
-				int barsIndex = (ReversalDistancePoints > 0) ? 1 : 0;
-				entryOrder = SubmitOrderUnmanaged(barsIndex, OrderAction.Buy, OrderType.Market, 1, entryPrice, 0, "ZigZagLong", "");
-				MyPrint($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{entryPrice:F2} BarsIndex{barsIndex}]");
+				// Unmanaged mode - submit entry order on primary series (index 0)
+				entryOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, OrderType.Market, 1, Close[0], 0, "ZigZagLong", "");
+				MyPrint($"[ENTRY LONG SUBMITTED B{CurrentBar} Price{Close[0]:F2}]");
 			}
 			else
 			{
 				// ATM mode - create ATM strategy
-				CreateAtmStrategy(OrderAction.Buy, entryPrice);
+				CreateAtmStrategy(OrderAction.Buy, Close[0]);
 			}
 		}
 
@@ -942,6 +867,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// But NOT in the same bar where HasLeftZone was set
 				if (High[0] > zoneTop && high.LeftZoneBar != CurrentBar)
 				{
+					// Cancel pending limit order for this zone (LimitEntry mode)
+					if (EntryModeSelected == EntryMode.LimitEntry && pendingLimitOrderShort != null && pendingLimitPriceShort == high.Price)
+					{
+						CancelOrder(pendingLimitOrderShort);
+						MyPrint($"[LIMIT SHORT CANCELLED - ZONE INVALIDATED] ZigZag:{pendingLimitPriceShort:F2}");
+						pendingLimitOrderShort = null;
+						pendingLimitPriceShort = 0;
+					}
+					
 					zigZagHighs.Remove(high);
 					MyPrint($"[HIGH ZONE INVALIDATED B{CurrentBar} P{high.Price:F2} High{High[0]:F2}]");
 				}
@@ -974,6 +908,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// But NOT in the same bar where HasLeftZone was set
 				if (Low[0] < zoneBottom && low.LeftZoneBar != CurrentBar)
 				{
+					// Cancel pending limit order for this zone (LimitEntry mode)
+					if (EntryModeSelected == EntryMode.LimitEntry && pendingLimitOrderLong != null && pendingLimitPriceLong == low.Price)
+					{
+						CancelOrder(pendingLimitOrderLong);
+						MyPrint($"[LIMIT LONG CANCELLED - ZONE INVALIDATED] ZigZag:{pendingLimitPriceLong:F2}");
+						pendingLimitOrderLong = null;
+						pendingLimitPriceLong = 0;
+					}
+					
 					zigZagLows.Remove(low);
 					MyPrint($"[LOW ZONE INVALIDATED B{CurrentBar} P{low.Price:F2} Low{Low[0]:F2}]");
 				}
@@ -1039,6 +982,104 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 		}
 
+		private void PlaceLimitOrdersPair()
+		{
+			double currentPrice = Close[0];
+			double minDistance = double.MaxValue;
+			
+			// Find CLOSEST untraded ZigZag high (for short entry)
+			ZigZagLevel nextHigh = null;
+			foreach (ZigZagLevel high in zigZagHighs)
+			{
+				bool isTraded = IsAlreadyTraded(high.Price, tradedHighs);
+				bool hasPending = IsSamePrice(pendingLimitPriceShort, high.Price);
+				double distance = Math.Abs(high.Price - currentPrice);
+				
+				// Check: not traded and not already having a pending order at this price
+				// NOTE: No ActivationBar check for LimitEntry - purely price-based, bar-independent
+				if (!isTraded && !hasPending)
+				{
+					if (distance < minDistance)
+					{
+						minDistance = distance;
+						nextHigh = high;
+					}
+				}
+			}
+
+			// Find CLOSEST untraded ZigZag low (for long entry)
+			minDistance = double.MaxValue;
+			ZigZagLevel nextLow = null;
+			foreach (ZigZagLevel low in zigZagLows)
+			{
+				bool isTraded = IsAlreadyTraded(low.Price, tradedLows);
+				bool hasPending = IsSamePrice(pendingLimitPriceLong, low.Price);
+				double distance = Math.Abs(low.Price - currentPrice);
+				
+				// Check: not traded and not already having a pending order at this price
+				// NOTE: No ActivationBar check for LimitEntry - purely price-based, bar-independent
+				if (!isTraded && !hasPending)
+				{
+					if (distance < minDistance)
+					{
+						minDistance = distance;
+						nextLow = low;
+					}
+				}
+			}
+
+			// Place limit order for short entry at next high
+			if (nextHigh != null)
+			{
+				// Limit price = ZigZag High - ZoneBelowPoints
+				double limitPrice = nextHigh.Price - ZoneBelowPoints;
+				
+				// IMPORTANT: Only place order if price is BELOW limit (hasn't reached it yet)
+				// Sell Limit must be ABOVE current price, otherwise it would fill immediately
+				if (limitPrice > currentPrice)
+				{
+					pendingLimitOrderShort = SubmitOrderUnmanaged(1, OrderAction.SellShort, OrderType.Limit, 1, limitPrice, 0, "ZigZagLimitShort", "");
+					pendingLimitPriceShort = nextHigh.Price;
+					MyPrint($"[LIMIT SHORT PLACED] ZigZag:{nextHigh.Price:F2} LimitPrice:{limitPrice:F2} Distance:{Math.Abs(nextHigh.Price - currentPrice):F2}");
+				}
+			}
+
+			// Place limit order for long entry at next low
+			if (nextLow != null)
+			{
+				// Limit price = ZigZag Low + ZoneBelowPoints
+				double limitPrice = nextLow.Price + ZoneBelowPoints;
+				
+				// IMPORTANT: Only place order if price is ABOVE limit (hasn't reached it yet)
+				// Buy Limit must be BELOW current price, otherwise it would fill immediately
+				if (limitPrice < currentPrice)
+				{
+					pendingLimitOrderLong = SubmitOrderUnmanaged(1, OrderAction.Buy, OrderType.Limit, 1, limitPrice, 0, "ZigZagLimitLong", "");
+					pendingLimitPriceLong = nextLow.Price;
+					MyPrint($"[LIMIT LONG PLACED] ZigZag:{nextLow.Price:F2} LimitPrice:{limitPrice:F2} Distance:{Math.Abs(nextLow.Price - currentPrice):F2}");
+				}
+			}
+		}
+
+		private void CancelAllPendingLimitOrders()
+		{
+			if (pendingLimitOrderLong != null)
+			{
+				CancelOrder(pendingLimitOrderLong);
+				MyPrint($"[LIMIT LONG CANCELLED] ZigZag:{pendingLimitPriceLong:F2}");
+				pendingLimitOrderLong = null;
+				pendingLimitPriceLong = 0;
+			}
+
+			if (pendingLimitOrderShort != null)
+			{
+				CancelOrder(pendingLimitOrderShort);
+				MyPrint($"[LIMIT SHORT CANCELLED] ZigZag:{pendingLimitPriceShort:F2}");
+				pendingLimitOrderShort = null;
+				pendingLimitPriceShort = 0;
+			}
+		}
+
 		private void HandleAtmStrategy()
 		{
 			// Check that atm strategy was created before checking other properties
@@ -1065,6 +1106,25 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 		}
 
+		// Helper method: Check if price is already traded (with tolerance for floating point comparison)
+		private bool IsAlreadyTraded(double price, HashSet<double> tradedSet)
+		{
+			const double tolerance = 0.01; // 1 cent tolerance
+			foreach (double tradedPrice in tradedSet)
+			{
+				if (Math.Abs(price - tradedPrice) < tolerance)
+					return true;
+			}
+			return false;
+		}
+
+		// Helper method: Check if two prices are the same (with tolerance for floating point comparison)
+		private bool IsSamePrice(double price1, double price2)
+		{
+			const double tolerance = 0.01; // 1 cent tolerance
+			return Math.Abs(price1 - price2) < tolerance;
+		}
+
 		// Custom Print method with logging control
 		private void MyPrint(string message)
 		{
@@ -1074,6 +1134,30 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 
 		#region Properties
+
+		[XmlIgnore]
+		[NinjaScriptProperty]
+		[Display(Name = "Entry Mode", Description = "BarReversal: Market order on bar reversal | LimitEntry: Limit orders at ZigZag points", Order = 0, GroupName = "Entry Settings")]
+		public EntryMode EntryModeSelected { get; set; }
+
+		[Browsable(false)]
+		public string EntryModeSelectedSerialize
+		{
+			get { return EntryModeSelected.ToString(); }
+			set { EntryModeSelected = (EntryMode)Enum.Parse(typeof(EntryMode), value); }
+		}
+
+		[XmlIgnore]
+		[NinjaScriptProperty]
+		[Display(Name = "Secondary Series Type", Description = "Tick: 1 Tick bars | Second: 1 Second bars", Order = 1, GroupName = "Entry Settings")]
+		public SecondarySeriesType SecondaryDataSeriesType { get; set; }
+
+		[Browsable(false)]
+		public string SecondaryDataSeriesTypeSerialize
+		{
+			get { return SecondaryDataSeriesType.ToString(); }
+			set { SecondaryDataSeriesType = (SecondarySeriesType)Enum.Parse(typeof(SecondarySeriesType), value); }
+		}
 
 		[Range(0.1, double.MaxValue), NinjaScriptProperty]
 		[Display(Name = "DeviationValue", Order = 1, GroupName = "ZigZag Parameters")]
@@ -1138,9 +1222,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 			get { return TradingEndTime.ToString(); }
 			set { TradingEndTime = TimeSpan.Parse(value); }
 		}
-
-		[Browsable(false)]
-		public double ReversalDistancePoints { get; set; }
 
 		[NinjaScriptProperty]
 		[Display(Name = "AtmTemplateName", Order = 13, GroupName = "ATM Strategy")]
