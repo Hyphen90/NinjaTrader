@@ -716,12 +716,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Check entry mode
 			if (EntryModeSelected == EntryMode.LimitEntry)
 			{
-				// Limit Entry Mode: Place limit orders at next ZigZag points
-				// Only place new orders if no pending limit orders exist
-				if (pendingLimitOrderLong == null && pendingLimitOrderShort == null)
-				{
-					PlaceLimitOrdersPair();
-				}
+				// Limit Entry Mode: Place/update limit orders at next ZigZag points
+				// Place Long and Short orders independently
+				PlaceOrUpdateLimitLong();
+				PlaceOrUpdateLimitShort();
 			}
 			else // BarReversal mode
 			{
@@ -1057,6 +1055,102 @@ namespace NinjaTrader.NinjaScript.Strategies
 					pendingLimitOrderLong = SubmitOrderUnmanaged(1, OrderAction.Buy, OrderType.Limit, 1, limitPrice, 0, "ZigZagLimitLong", "");
 					pendingLimitPriceLong = nextLow.Price;
 					MyPrint($"[LIMIT LONG PLACED] ZigZag:{nextLow.Price:F2} LimitPrice:{limitPrice:F2} Distance:{Math.Abs(nextLow.Price - currentPrice):F2}");
+				}
+			}
+		}
+
+		private void PlaceOrUpdateLimitLong()
+		{
+			double currentPrice = Close[0];
+			double minDistance = double.MaxValue;
+			
+			// Find CLOSEST untraded ZigZag low (for long entry)
+			ZigZagLevel nextLow = null;
+			foreach (ZigZagLevel low in zigZagLows)
+			{
+				bool isTraded = IsAlreadyTraded(low.Price, tradedLows);
+				double distance = Math.Abs(low.Price - currentPrice);
+				
+				if (!isTraded && distance < minDistance)
+				{
+					minDistance = distance;
+					nextLow = low;
+				}
+			}
+
+			// Check if we need to place or update the order
+			if (nextLow != null)
+			{
+				double limitPrice = nextLow.Price + ZoneBelowPoints;
+				
+				// Only place order if price is ABOVE limit (hasn't reached it yet)
+				if (limitPrice < currentPrice)
+				{
+					// Check if we already have an order at a different ZigZag
+					if (pendingLimitOrderLong != null && !IsSamePrice(pendingLimitPriceLong, nextLow.Price))
+					{
+						// New ZigZag is closer - cancel old order
+						CancelOrder(pendingLimitOrderLong);
+						MyPrint($"[LIMIT LONG CANCELLED - CLOSER ZIGZAG] Old:{pendingLimitPriceLong:F2} New:{nextLow.Price:F2}");
+						pendingLimitOrderLong = null;
+						pendingLimitPriceLong = 0;
+					}
+					
+					// Place new order if we don't have one
+					if (pendingLimitOrderLong == null)
+					{
+						pendingLimitOrderLong = SubmitOrderUnmanaged(1, OrderAction.Buy, OrderType.Limit, 1, limitPrice, 0, "ZigZagLimitLong", "");
+						pendingLimitPriceLong = nextLow.Price;
+						MyPrint($"[LIMIT LONG PLACED] ZigZag:{nextLow.Price:F2} LimitPrice:{limitPrice:F2} Distance:{minDistance:F2}");
+					}
+				}
+			}
+		}
+
+		private void PlaceOrUpdateLimitShort()
+		{
+			double currentPrice = Close[0];
+			double minDistance = double.MaxValue;
+			
+			// Find CLOSEST untraded ZigZag high (for short entry)
+			ZigZagLevel nextHigh = null;
+			foreach (ZigZagLevel high in zigZagHighs)
+			{
+				bool isTraded = IsAlreadyTraded(high.Price, tradedHighs);
+				double distance = Math.Abs(high.Price - currentPrice);
+				
+				if (!isTraded && distance < minDistance)
+				{
+					minDistance = distance;
+					nextHigh = high;
+				}
+			}
+
+			// Check if we need to place or update the order
+			if (nextHigh != null)
+			{
+				double limitPrice = nextHigh.Price - ZoneBelowPoints;
+				
+				// Only place order if price is BELOW limit (hasn't reached it yet)
+				if (limitPrice > currentPrice)
+				{
+					// Check if we already have an order at a different ZigZag
+					if (pendingLimitOrderShort != null && !IsSamePrice(pendingLimitPriceShort, nextHigh.Price))
+					{
+						// New ZigZag is closer - cancel old order
+						CancelOrder(pendingLimitOrderShort);
+						MyPrint($"[LIMIT SHORT CANCELLED - CLOSER ZIGZAG] Old:{pendingLimitPriceShort:F2} New:{nextHigh.Price:F2}");
+						pendingLimitOrderShort = null;
+						pendingLimitPriceShort = 0;
+					}
+					
+					// Place new order if we don't have one
+					if (pendingLimitOrderShort == null)
+					{
+						pendingLimitOrderShort = SubmitOrderUnmanaged(1, OrderAction.SellShort, OrderType.Limit, 1, limitPrice, 0, "ZigZagLimitShort", "");
+						pendingLimitPriceShort = nextHigh.Price;
+						MyPrint($"[LIMIT SHORT PLACED] ZigZag:{nextHigh.Price:F2} LimitPrice:{limitPrice:F2} Distance:{minDistance:F2}");
+					}
 				}
 			}
 		}
